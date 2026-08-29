@@ -1,3 +1,4 @@
 FROM registry.fedoraproject.org/fedora-minimal:44
+RUN microdnf -y install iproute nftables && microdnf clean all
 COPY netd /usr/bin/netd
 CMD ["/usr/bin/netd"]
