@@ -1,0 +1,5 @@
+FROM registry.fedoraproject.org/fedora-minimal:44
+RUN microdnf -y install python3 openssl shadow-utils hostname iproute && microdnf clean all
+COPY fwos-ui /usr/bin/fwos-ui
+RUN chmod 755 /usr/bin/fwos-ui
+CMD ["/usr/bin/fwos-ui"]

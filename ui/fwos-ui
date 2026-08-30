@@ -1,0 +1,215 @@
+#!/usr/bin/python3
+import ipaddress
+import json
+import os
+import socket
+import ssl
+import subprocess
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+SOCK = "/var/lib/fwos/netd.sock"
+CERT = "/var/lib/fwos/ui-cert.pem"
+KEY = "/var/lib/fwos/ui-key.pem"
+BOOTSTRAP = "/var/lib/fwos/bootstrapped"
+CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+FORM = """<!DOCTYPE html>
+<html><head><title>FWOS Bootstrap</title></head>
+<body>
+<h1>FWOS Bootstrap</h1>
+<form method="post" action="/bootstrap">
+<label>hostname <input name="hostname" required></label><br>
+<label>admin <input name="admin" required></label><br>
+<label>password <input type="password" name="password" required></label><br>
+<label>Management NIC <input name="mgmt" required></label><br>
+<label>WAN NIC <input name="wan" required></label><br>
+<label>WAN address <input name="wan_addr" value="192.0.2.1/24"></label><br>
+<label>WAN IPv6 <input name="wan_addr6"></label><br>
+<label>WAN PD <input name="wan_pd"></label><br>
+<label>LAN prefix <input name="lan_prefix" value="192.168.1.0/24"></label><br>
+<label>DHCP pool <input name="dhcp_pool" value="192.168.1.100-192.168.1.200"></label><br>
+<button type="submit">Bootstrap</button>
+</form>
+</body></html>
+"""
+
+
+def allowed(ip: str) -> bool:
+    addr = ipaddress.ip_address(ip.split("%")[0])
+    if isinstance(addr, ipaddress.IPv4Address):
+        if addr in CGNAT:
+            return False
+        return bool((addr.is_private or addr.is_link_local) and addr not in CGNAT)
+    return bool(addr.is_link_local or addr.is_private)
+
+
+def host_addrs():
+    out = subprocess.check_output(
+        ["ip", "-o", "addr", "show"], text=True, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+    )
+    found = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        ifname = parts[1]
+        fam = parts[2]
+        cidr = parts[3]
+        ip = cidr.split("/")[0]
+        if fam not in ("inet", "inet6"):
+            continue
+        if not allowed(ip):
+            continue
+        scope = 0
+        if fam == "inet6" and ip.startswith("fe80:"):
+            try:
+                scope = socket.if_nametoindex(ifname.split("@")[0])
+            except OSError:
+                continue
+        found.append((fam, ip, scope))
+    return found
+
+
+def ensure_cert():
+    if os.path.exists(CERT) and os.path.exists(KEY):
+        return
+    os.makedirs("/var/lib/fwos", exist_ok=True)
+    subprocess.check_call(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            KEY,
+            "-out",
+            CERT,
+            "-days",
+            "3650",
+            "-nodes",
+            "-subj",
+            "/CN=fwos",
+        ]
+    )
+
+
+def netd_apply(body: dict) -> str:
+    raw = json.dumps(body).encode()
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(60)
+    s.connect(SOCK)
+    s.sendall(raw)
+    s.shutdown(socket.SHUT_WR)
+    return s.recv(65536).decode()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(FORM.encode())
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(n).decode()
+        form = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+        hostname = form.get("hostname", "").strip()
+        admin = form.get("admin", "").strip()
+        password = form.get("password", "")
+        mgmt = form.get("mgmt", "").strip()
+        wan = form.get("wan", "").strip()
+        wan_addr = form.get("wan_addr", "192.0.2.1/24").strip()
+        wan_addr6 = form.get("wan_addr6", "").strip()
+        wan_pd = form.get("wan_pd", "").strip()
+        lan_prefix = form.get("lan_prefix", "").strip()
+        dhcp_pool = form.get("dhcp_pool", "").strip()
+        if not (hostname and admin and password and mgmt and wan):
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"missing fields")
+            return
+        with open("/etc/hostname", "w") as f:
+            f.write(hostname + "\n")
+        with open("/var/lib/fwos/hostname", "w") as f:
+            f.write(hostname + "\n")
+        subprocess.call(["hostname", hostname])
+        subprocess.call(["useradd", "-m", "-G", "wheel", admin])
+        subprocess.run(
+            ["chpasswd"],
+            input=f"{admin}:{password}",
+            text=True,
+            check=False,
+        )
+        wan_addrs = [a for a in [wan_addr, wan_addr6] if a]
+        desired = {
+            "hostname": hostname,
+            "lan_prefix": lan_prefix,
+            "dhcp_pool": dhcp_pool,
+            "wan_pd": wan_pd,
+            "interfaces": [
+                {
+                    "name": wan,
+                    "placement": "fwd",
+                    "role": "wan",
+                    "addresses": wan_addrs,
+                },
+                {"name": mgmt, "placement": "mgmt"},
+            ],
+        }
+        reply = netd_apply(desired)
+        ok = '"ok": true' in reply or '"ok":true' in reply
+        if ok:
+            os.makedirs("/var/lib/fwos", exist_ok=True)
+            with open(BOOTSTRAP, "w") as f:
+                f.write("ok\n")
+        self.send_response(200 if ok else 502)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(reply.encode())
+
+
+class V6Server(HTTPServer):
+    address_family = socket.AF_INET6
+
+
+def serve(fam, ip, scope, ctx):
+    try:
+        if fam == "inet":
+            httpd = HTTPServer((ip, 443), Handler)
+        else:
+            httpd = V6Server((ip, 443, 0, scope), Handler)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        httpd.serve_forever()
+    except Exception:
+        return
+
+
+def main():
+    ensure_cert()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(CERT, KEY)
+    addrs = []
+    for _ in range(300):
+        addrs = host_addrs()
+        if addrs:
+            break
+        threading.Event().wait(0.2)
+    if not addrs:
+        raise SystemExit("no allowed addresses to bind")
+    threads = []
+    for fam, ip, scope in addrs:
+        t = threading.Thread(target=serve, args=(fam, ip, scope, ctx), daemon=True)
+        t.start()
+        threads.append(t)
+    threads[0].join()
+
+
+if __name__ == "__main__":
+    main()
