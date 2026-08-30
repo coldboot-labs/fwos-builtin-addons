@@ -1,0 +1,6 @@
+#!/bin/sh
+# Fedora Kea dirs are 0750 kea:kea; DropCapability=ALL removes DAC_OVERRIDE
+# so uid 0 cannot write them. -X lets Kea stay root instead of setuid kea.
+export KEA_PIDFILE_DIR=/tmp
+export KEA_LOCKFILE_DIR=/tmp
+exec /usr/bin/kea-dhcp6 -X -c /etc/kea/kea-dhcp6.conf

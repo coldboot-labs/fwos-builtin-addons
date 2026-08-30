@@ -1,0 +1,5 @@
+FROM registry.fedoraproject.org/fedora-minimal:44
+RUN microdnf -y install kea && microdnf clean all
+COPY run-dhcp4 run-dhcp6 /usr/bin/
+RUN chmod 755 /usr/bin/run-dhcp4 /usr/bin/run-dhcp6
+CMD ["/usr/bin/run-dhcp4"]
