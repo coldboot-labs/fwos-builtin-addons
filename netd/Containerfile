@@ -1,4 +1,4 @@
 FROM registry.fedoraproject.org/fedora-minimal:44
-RUN microdnf -y install iproute nftables systemd && microdnf clean all
+RUN microdnf -y install iproute iproute-tc nftables wireguard-tools systemd && microdnf clean all
 COPY netd /usr/bin/netd
 CMD ["/usr/bin/netd"]
