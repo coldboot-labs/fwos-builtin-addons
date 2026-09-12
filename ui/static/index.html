@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FWOS</title>
+  <style>
+    body { font-family: sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    label, .nic { display: block; margin: 0.6rem 0; }
+    input, select { margin-left: 0.4rem; }
+    .nic { padding: 0.5rem 0.75rem; border: 1px solid #ccc; }
+    button { margin-top: 1rem; }
+    .err { color: #a40000; }
+    .muted { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>FWOS</h1>
+  <div id="app">
+    <h2>Bootstrap wizard</h2>
+    <p>
+      Collects admin, hostname, NIC placement (fwd or mgmt, including one-NIC stick VLANs),
+      static or DHCP, LAN prefix, DHCP pool, WAN v6/PD.
+      Default policy is applied automatically when a WAN exists.
+    </p>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
