@@ -44,8 +44,9 @@
       "</ul>";
   }
 
-  function nicOptions(nics, selected) {
-    return nics
+  function nicOptions(nics, selected, includeNone) {
+    var html = includeNone ? "<option value=\"\">none</option>" : "";
+    return html + nics
       .map(function (n) {
         var sel = n.name === selected ? " selected" : "";
         return "<option value=\"" + esc(n.name) + "\"" + sel + ">" + esc(n.name) + "</option>";
@@ -78,8 +79,14 @@
       (oneNic ? " checked" : "") +
       "> tagged</label>" +
       "<label>LAN VLAN <input id=\"lan_vlan\" value=\"20\"></label>" +
+      "<h3>Management NIC</h3>" +
+      "<label>Management NIC <select id=\"mgmt_nic\">" +
+      nicOptions(nics, "", true) +
+      "</select></label>" +
+      "<label>on-link prefix <input id=\"mgmt_prefix\" placeholder=\"no gateway\"></label>" +
       "<h3>UI exposure</h3>" +
-      "<label><input type=\"checkbox\" id=\"expose_lan\" checked disabled> LAN (required)</label>" +
+      "<label id=\"expose_mgmt_row\" style=\"display:none\"><input type=\"checkbox\" id=\"expose_mgmt\" checked disabled> Management NIC</label>" +
+      "<label><input type=\"checkbox\" id=\"expose_lan\" checked disabled> LAN <span id=\"lan_req\">(required)</span></label>" +
       "<p id=\"warn\" class=\"muted\"></p>" +
       "<label>addressing" +
       "<select id=\"addressing\">" +
@@ -96,6 +103,21 @@
       "</form>";
     function refreshWarn() {
       var warn = document.getElementById("warn");
+      var hasMgmt = !!val("mgmt_nic");
+      var mgmtRow = document.getElementById("expose_mgmt_row");
+      var lanBox = document.getElementById("expose_lan");
+      var lanReq = document.getElementById("lan_req");
+      if (mgmtRow) mgmtRow.style.display = hasMgmt ? "block" : "none";
+      if (lanBox) {
+        if (hasMgmt) {
+          lanBox.disabled = false;
+          if (lanReq) lanReq.textContent = "(optional)";
+        } else {
+          lanBox.checked = true;
+          lanBox.disabled = true;
+          if (lanReq) lanReq.textContent = "(required)";
+        }
+      }
       if (nics.length === 1 && checked("lan_tagged")) {
         warn.textContent =
           "Untagged first-boot HTTPS will vanish if the untagged L2 is not in the post-apply UI exposure set. Apply still proceeds.";
@@ -103,7 +125,7 @@
         warn.textContent = "";
       }
     }
-    ["wan_nic", "lan_nic", "wan_tagged", "lan_tagged"].forEach(function (id) {
+    ["wan_nic", "lan_nic", "wan_tagged", "lan_tagged", "mgmt_nic"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener("change", refreshWarn);
     });
@@ -138,12 +160,21 @@
     }
     var wanNic = val("wan_nic");
     var lanNic = val("lan_nic");
+    var mgmtNic = val("mgmt_nic");
     var wanTagged = checked("wan_tagged");
     var lanTagged = checked("lan_tagged");
     var wanVid = parseInt(val("wan_vlan") || "10", 10);
     var lanVid = parseInt(val("lan_vlan") || "20", 10);
     if (wanNic === lanNic && wanTagged === lanTagged && (!wanTagged || wanVid === lanVid)) {
       err.textContent = "WAN and LAN must not share the same parent and tag";
+      return;
+    }
+    if (mgmtNic && (wanNic === mgmtNic || lanNic === mgmtNic)) {
+      err.textContent = "WAN or LAN must not share a parent with a Management NIC";
+      return;
+    }
+    if (mgmtNic && !val("mgmt_prefix")) {
+      err.textContent = "Management NIC needs an on-link static prefix";
       return;
     }
     var wanName = l2Name(wanNic, wanTagged, wanVid);
@@ -182,8 +213,15 @@
         addresses: lanAddr ? [lanAddr] : [],
       });
     }
+    if (mgmtNic) {
+      interfaces.push({
+        name: mgmtNic,
+        role: "mgmt",
+        addresses: [val("mgmt_prefix")],
+      });
+    }
     nics.forEach(function (n) {
-      var used = n.name === wanNic || n.name === lanNic;
+      var used = n.name === wanNic || n.name === lanNic || n.name === mgmtNic;
       if (!used) {
         interfaces.push({ name: n.name, role: "unused" });
       } else if ((n.name === wanNic && wanTagged) || (n.name === lanNic && lanTagged)) {
@@ -192,12 +230,19 @@
         }
       }
     });
+    var exposure = [];
+    if (mgmtNic) exposure.push(mgmtNic);
+    if (checked("expose_lan")) exposure.push(lanName);
+    if (!exposure.length) {
+      err.textContent = "ui_exposure must not be empty";
+      return;
+    }
     var payload = {
       hostname: val("hostname"),
       admin: val("admin"),
       password: document.getElementById("password").value,
       interfaces: interfaces,
-      ui_exposure: [lanName],
+      ui_exposure: exposure,
       lan_prefix: val("lan_prefix"),
       dhcp_pool: val("dhcp_pool"),
       wan_pd: val("wan_pd"),
