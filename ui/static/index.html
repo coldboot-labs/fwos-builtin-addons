@@ -18,9 +18,9 @@
   <div id="app">
     <h2>Bootstrap wizard</h2>
     <p>
-      Collects admin, hostname, NIC placement (fwd or mgmt, including one-NIC stick VLANs),
-      static or DHCP, LAN prefix, DHCP pool, WAN v6/PD.
-      Default policy is applied automatically when a WAN exists.
+      Collects admin, hostname, one WAN L2, one LAN L2, operator-chosen VLAN IDs when tagged,
+      UI exposure, static or DHCP, LAN prefix, DHCP pool, WAN v6/PD.
+      Extra NICs stay unused. Default policy is applied automatically when a WAN exists.
     </p>
   </div>
   <script src="/app.js"></script>
