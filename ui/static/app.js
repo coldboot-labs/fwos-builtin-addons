@@ -65,13 +65,13 @@
       "<label>admin <input id=\"admin\" required></label>" +
       "<label>password <input id=\"password\" type=\"password\" required></label>" +
       "<h3>WAN</h3>" +
-      "<label>WAN NIC <select id=\"wan_nic\">" +
+      "<label>WAN <select id=\"wan_nic\">" +
       nicOptions(nics, wanDefault) +
       "</select></label>" +
       "<label><input type=\"checkbox\" id=\"wan_tagged\"> tagged</label>" +
       "<label>WAN VLAN <input id=\"wan_vlan\" value=\"10\"></label>" +
       "<h3>LAN</h3>" +
-      "<label>LAN NIC <select id=\"lan_nic\">" +
+      "<label>LAN <select id=\"lan_nic\">" +
       nicOptions(nics, lanDefault) +
       "</select></label>" +
       "<label><input type=\"checkbox\" id=\"lan_tagged\"" +
