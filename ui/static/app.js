@@ -96,9 +96,9 @@
       "</form>";
     function refreshWarn() {
       var warn = document.getElementById("warn");
-      if (nics.length === 1 && !checked("wan_tagged")) {
+      if (nics.length === 1 && checked("lan_tagged")) {
         warn.textContent =
-          "Untagged first-boot HTTPS will vanish if untagged becomes WAN. Apply still proceeds.";
+          "Untagged first-boot HTTPS will vanish if the untagged L2 is not in the post-apply UI exposure set. Apply still proceeds.";
       } else {
         warn.textContent = "";
       }
