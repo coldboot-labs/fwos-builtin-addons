@@ -19,7 +19,53 @@
     return !!(el && el.checked);
   }
 
+  function renderLogin() {
+    app.innerHTML =
+      "<h2>Sign in</h2>" +
+      "<form id=\"login\">" +
+      "<label>Username <input id=\"username\" autocomplete=\"username\" required></label>" +
+      "<label>Password <input id=\"password\" type=\"password\" autocomplete=\"current-password\" required></label>" +
+      "<button type=\"submit\">Sign in</button>" +
+      "<p id=\"login-error\" class=\"err\" role=\"alert\"></p>" +
+      "</form>";
+    var form = document.getElementById("login");
+    form.addEventListener("submit", async function (ev) {
+      ev.preventDefault();
+      var button = form.querySelector("button");
+      var error = document.getElementById("login-error");
+      var password = document.getElementById("password");
+      button.disabled = true;
+      error.textContent = "";
+      var body = JSON.stringify({
+        source: "local",
+        username: val("username"),
+        password: password.value,
+      });
+      password.value = "";
+      try {
+        var response = await fetch("/api/login", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          error.textContent = result.error || "login failed";
+          password.focus();
+          return;
+        }
+        await load();
+      } catch (e) {
+        error.textContent = "Sign in is unavailable. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
   function renderStatus(st) {
+    var principal = st.principal || {};
     var ifaces = (st.interfaces || [])
       .map(function (i) {
         var bits = [esc(i.name)];
@@ -33,6 +79,10 @@
     var exposure = (st.ui_exposure || []).map(esc).join(", ");
     app.innerHTML =
       "<h2>Status</h2>" +
+      "<p>Signed in as " + esc(principal.username || "") +
+      " (" + esc(principal.source || "") + ")</p>" +
+      "<button id=\"sign-out\" type=\"button\">Sign out</button>" +
+      "<p id=\"logout-error\" class=\"err\" role=\"alert\"></p>" +
       "<p>hostname: " + esc(st.hostname || "") + "</p>" +
       "<p>LAN prefix: " + esc(st.lan_prefix || "") + "</p>" +
       "<p>DHCP pool: " + esc(st.dhcp_pool || "") + "</p>" +
@@ -42,6 +92,29 @@
       "<h3>NICs</h3><ul>" +
       ifaces +
       "</ul>";
+    document.getElementById("sign-out").addEventListener("click", async function (ev) {
+      var button = ev.currentTarget;
+      var error = document.getElementById("logout-error");
+      button.disabled = true;
+      error.textContent = "";
+      try {
+        var response = await fetch("/api/logout", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (response.ok || response.status === 401) {
+          renderLogin();
+        } else {
+          error.textContent = "Sign out failed. Please try again.";
+        }
+      } catch (e) {
+        error.textContent = "Sign out is unavailable. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    });
   }
 
   function nicOptions(nics, selected, includeNone) {
@@ -267,7 +340,13 @@
 
   async function load() {
     try {
-      var st = await (await fetch("/api/status")).json();
+      var response = await fetch("/api/status", { credentials: "same-origin" });
+      if (response.status === 401) {
+        renderLogin();
+        return;
+      }
+      if (!response.ok) throw new Error("Status is unavailable. Please reload.");
+      var st = await response.json();
       if (st.bootstrapped) renderStatus(st);
       else renderWizard(st);
     } catch (e) {
