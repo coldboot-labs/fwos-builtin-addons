@@ -1,5 +1,5 @@
 FROM registry.fedoraproject.org/fedora-minimal:44
-RUN microdnf -y install shadow-utils hostname iproute && microdnf clean all
+RUN microdnf -y install libxcrypt && microdnf clean all
 COPY fwos-ui /usr/bin/fwos-ui
 COPY static /usr/share/fwos-ui
 RUN chmod 755 /usr/bin/fwos-ui
