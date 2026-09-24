@@ -151,6 +151,8 @@
       var button = form.querySelector("button");
       var resultText = document.getElementById("password-change-result");
       var password = document.getElementById("replacement-password");
+      var changingSelf = principal.source === "local" &&
+        val("change-administrator-name") === principal.username;
       button.disabled = true;
       resultText.textContent = "";
       var body = JSON.stringify({
@@ -168,6 +170,10 @@
         var result = await response.json();
         if (!response.ok || !result.ok) {
           resultText.textContent = result.error || "Could not change password.";
+          return;
+        }
+        if (changingSelf) {
+          renderLogin();
           return;
         }
         resultText.textContent = "Password changed";
