@@ -343,7 +343,7 @@
           if (lanReq) lanReq.textContent = "(required)";
         }
       }
-      if (nics.length === 1 && checked("lan_tagged")) {
+      if (nics.length === 1 && !checked("wan_tagged") && checked("lan_tagged")) {
         warn.textContent =
           "Untagged first-boot HTTPS will vanish if the untagged L2 is not in the post-apply UI exposure set. Apply still proceeds.";
       } else {
@@ -479,6 +479,11 @@
         body: JSON.stringify(payload),
       });
       var j = await r.json();
+      if (j.bootstrapped) {
+        app.innerHTML = "<p>Bootstrap ownership is complete. Sign in at a UI-exposed address to review and repair configuration.</p>";
+        window.setTimeout(load, 1000);
+        return;
+      }
       if (!r.ok || !j.ok) {
         err.textContent = j.error || r.statusText || "bootstrap failed";
         return;
@@ -486,7 +491,7 @@
       app.innerHTML = "<p>Bootstrap complete. Reloading status…</p>";
       window.setTimeout(load, 1000);
     } catch (e) {
-      err.textContent = String(e);
+      err.textContent = "Connection lost while applying. Check the Appliance console or the configured UI address to confirm whether Bootstrap completed.";
     }
   }
 
