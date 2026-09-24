@@ -91,7 +91,121 @@
       "<p class=\"muted\">Default policy is applied automatically when a WAN exists.</p>" +
       "<h3>NICs</h3><ul>" +
       ifaces +
-      "</ul>";
+      "</ul>" +
+      "<section><h3>Administrators</h3>" +
+      "<ul id=\"administrator-list\"></ul>" +
+      "<form id=\"create-administrator\">" +
+      "<label>New administrator username <input id=\"new-administrator-username\" required></label>" +
+      "<label>New administrator password <input id=\"new-administrator-password\" type=\"password\" required></label>" +
+      "<button type=\"submit\">Create administrator</button>" +
+      "<p id=\"administrators-error\" class=\"err\" role=\"alert\"></p>" +
+      "</form>" +
+      "<form id=\"change-administrator-password\">" +
+      "<label>Administrator to change <select id=\"change-administrator-name\"></select></label>" +
+      "<label>Replacement password <input id=\"replacement-password\" type=\"password\" required></label>" +
+      "<button type=\"submit\">Change password</button>" +
+      "<p id=\"password-change-result\" role=\"status\"></p>" +
+      "</form>" +
+      "<form id=\"remove-administrator\">" +
+      "<label>Administrator to remove <select id=\"remove-administrator-name\"></select></label>" +
+      "<button type=\"submit\">Remove administrator</button>" +
+      "<p id=\"remove-administrator-result\" role=\"status\"></p>" +
+      "</form></section>";
+    loadAdministrators();
+    document.getElementById("create-administrator").addEventListener("submit", async function (ev) {
+      ev.preventDefault();
+      var form = ev.currentTarget;
+      var button = form.querySelector("button");
+      var error = document.getElementById("administrators-error");
+      var password = document.getElementById("new-administrator-password");
+      button.disabled = true;
+      error.textContent = "";
+      var body = JSON.stringify({
+        username: val("new-administrator-username"),
+        password: password.value,
+      });
+      password.value = "";
+      try {
+        var response = await fetch("/api/administrators", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          error.textContent = result.error || "Could not create administrator.";
+          return;
+        }
+        form.reset();
+        await loadAdministrators();
+      } catch (e) {
+        error.textContent = "Account changes are unavailable. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById("change-administrator-password").addEventListener("submit", async function (ev) {
+      ev.preventDefault();
+      var form = ev.currentTarget;
+      var button = form.querySelector("button");
+      var resultText = document.getElementById("password-change-result");
+      var password = document.getElementById("replacement-password");
+      button.disabled = true;
+      resultText.textContent = "";
+      var body = JSON.stringify({
+        username: val("change-administrator-name"),
+        password: password.value,
+      });
+      password.value = "";
+      try {
+        var response = await fetch("/api/administrators/password", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: body,
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          resultText.textContent = result.error || "Could not change password.";
+          return;
+        }
+        resultText.textContent = "Password changed";
+      } catch (e) {
+        resultText.textContent = "Account changes are unavailable. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById("remove-administrator").addEventListener("submit", async function (ev) {
+      ev.preventDefault();
+      var form = ev.currentTarget;
+      var button = form.querySelector("button");
+      var resultText = document.getElementById("remove-administrator-result");
+      var username = val("remove-administrator-name");
+      if (!username || !window.confirm("Remove administrator " + username + "?")) return;
+      button.disabled = true;
+      resultText.textContent = "";
+      try {
+        var response = await fetch("/api/administrators/remove", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          resultText.textContent = result.error || "Could not remove administrator.";
+          return;
+        }
+        resultText.textContent = "Administrator removed";
+        await loadAdministrators();
+      } catch (e) {
+        resultText.textContent = "Account changes are unavailable. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    });
     document.getElementById("sign-out").addEventListener("click", async function (ev) {
       var button = ev.currentTarget;
       var error = document.getElementById("logout-error");
@@ -115,6 +229,38 @@
         button.disabled = false;
       }
     });
+  }
+
+  async function loadAdministrators() {
+    var list = document.getElementById("administrator-list");
+    if (!list) return;
+    try {
+      var response = await fetch("/api/administrators", { credentials: "same-origin" });
+      if (response.status === 401) {
+        renderLogin();
+        return;
+      }
+      var result = await response.json();
+      if (!response.ok || !result.ok) throw new Error("account list unavailable");
+      list.innerHTML = (result.administrators || [])
+        .map(function (username) { return "<li>" + esc(username) + "</li>"; })
+        .join("");
+      var changeSelect = document.getElementById("change-administrator-name");
+      if (changeSelect) {
+        changeSelect.innerHTML = (result.administrators || [])
+          .map(function (username) { return "<option value=\"" + esc(username) + "\">" + esc(username) + "</option>"; })
+          .join("");
+      }
+      var removeSelect = document.getElementById("remove-administrator-name");
+      if (removeSelect) {
+        removeSelect.innerHTML = (result.administrators || [])
+          .map(function (username) { return "<option value=\"" + esc(username) + "\">" + esc(username) + "</option>"; })
+          .join("");
+      }
+    } catch (e) {
+      var error = document.getElementById("administrators-error");
+      if (error) error.textContent = "Could not load administrators.";
+    }
   }
 
   function nicOptions(nics, selected, includeNone) {
