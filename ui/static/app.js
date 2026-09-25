@@ -19,6 +19,14 @@
     return !!(el && el.checked);
   }
 
+  function recoveryText(result) {
+    if (result.restoration === "restored") return " Previous Accepted network restored.";
+    if (result.restoration === "failed" || result.restoration === "required") {
+      return " Network restoration needs recovery; check the Appliance console.";
+    }
+    return "";
+  }
+
   var acceptedRoutes = [];
   var workingRoutes = [];
   var acceptedRevision = 0;
@@ -144,14 +152,9 @@
         });
         var result = await response.json();
         if (!response.ok || !result.ok) {
-          var recovery = result.restoration === "restored"
-            ? " Previous Accepted network restored."
-            : result.restoration === "failed" || result.restoration === "required"
-              ? " Network restoration needs recovery; check the Appliance console."
-              : "";
           document.getElementById("route-result").textContent =
             (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
-            (result.error || "Route change unavailable") + recovery;
+            (result.error || "Route change unavailable") + recoveryText(result);
           return;
         }
         document.getElementById("route-review").hidden = true;
@@ -191,14 +194,9 @@
         });
         var result = await response.json();
         if (!response.ok || !result.ok) {
-          var recovery = result.restoration === "restored"
-            ? " Previous Accepted network restored."
-            : result.restoration === "failed" || result.restoration === "required"
-              ? " Network restoration needs recovery; check the Appliance console."
-              : "";
           document.getElementById("route-result").textContent = response.status === 409
             ? "Stale draft retained: " + (result.error || "review reconciliation")
-            : "Draft apply failed; draft retained: " + (result.error || "unknown error") + recovery;
+            : "Draft apply failed; draft retained: " + (result.error || "unknown error") + recoveryText(result);
           await loadRoutes();
           return;
         }
