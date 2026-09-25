@@ -19,6 +19,102 @@
     return !!(el && el.checked);
   }
 
+  var acceptedRoutes = [];
+  var acceptedRevision = 0;
+  var editingRoute = -1;
+  var proposedRoutes = null;
+
+  async function loadRoutes() {
+    var list = document.getElementById("route-list");
+    if (!list) return;
+    try {
+      var response = await fetch("/api/routes", { credentials: "same-origin" });
+      var result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Routes unavailable");
+      acceptedRoutes = result.routes || [];
+      acceptedRevision = result.revision;
+      var select = document.getElementById("route-interface");
+      select.innerHTML = "<option value=\"\">Automatic</option>" +
+        (result.interfaces || []).map(function (name) {
+          return "<option value=\"" + esc(name) + "\">" + esc(name) + "</option>";
+        }).join("");
+      list.innerHTML = acceptedRoutes.map(function (route, index) {
+        return "<li>" + esc(route.to) + " via " + esc(route.via) +
+          (route.dev ? " on " + esc(route.dev) : "") +
+          " <button type=\"button\" data-edit=\"" + index + "\">Edit</button>" +
+          " <button type=\"button\" data-remove=\"" + index + "\">Remove</button></li>";
+      }).join("");
+      list.querySelectorAll("[data-edit]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          editingRoute = Number(button.dataset.edit);
+          var route = acceptedRoutes[editingRoute];
+          document.getElementById("route-destination").value = route.to;
+          document.getElementById("route-gateway").value = route.via;
+          select.value = route.dev || "";
+          document.getElementById("route-destination").focus();
+        });
+      });
+      list.querySelectorAll("[data-remove]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var index = Number(button.dataset.remove);
+          proposedRoutes = acceptedRoutes.filter(function (_, i) { return i !== index; });
+          showRouteReview("Remove " + acceptedRoutes[index].to + " via " + acceptedRoutes[index].via);
+        });
+      });
+    } catch (error) {
+      document.getElementById("route-result").textContent = "Could not load Accepted routes: " + error.message;
+    }
+  }
+
+  function showRouteReview(summary) {
+    document.getElementById("route-review").hidden = false;
+    document.getElementById("route-summary").textContent = summary;
+    document.getElementById("route-result").textContent = "";
+  }
+
+  function setupRoutes() {
+    loadRoutes();
+    document.getElementById("route-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      var route = { to: val("route-destination"), via: val("route-gateway") };
+      if (val("route-interface")) route.dev = val("route-interface");
+      proposedRoutes = acceptedRoutes.slice();
+      if (editingRoute >= 0) proposedRoutes[editingRoute] = route;
+      else proposedRoutes.push(route);
+      showRouteReview((editingRoute >= 0 ? "Change " : "Add ") + route.to + " via " + route.via +
+        (route.dev ? " on " + route.dev : ""));
+    });
+    document.getElementById("route-apply").addEventListener("click", async function (event) {
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/routes/apply", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, routes: proposedRoutes }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("route-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "Route change unavailable");
+          return;
+        }
+        document.getElementById("route-review").hidden = true;
+        document.getElementById("route-result").textContent = "Accepted revision " + result.revision;
+        document.getElementById("route-form").reset();
+        editingRoute = -1;
+        proposedRoutes = null;
+        await loadRoutes();
+      } catch (_) {
+        document.getElementById("route-result").textContent = "Apply outcome unavailable; reload routes before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -92,6 +188,17 @@
       "<h3>NICs</h3><ul>" +
       ifaces +
       "</ul>" +
+      "<section><h3>Static routes</h3>" +
+      "<ul id=\"route-list\"></ul>" +
+      "<form id=\"route-form\">" +
+      "<label>Destination <input id=\"route-destination\" required placeholder=\"198.51.100.0/24\"></label>" +
+      "<label>Next hop <input id=\"route-gateway\" required placeholder=\"192.0.2.2\"></label>" +
+      "<label for=\"route-interface\">Interface</label> <select id=\"route-interface\"></select>" +
+      "<button type=\"submit\">Review route</button></form>" +
+      "<div id=\"route-review\" hidden><h4>Review route change</h4>" +
+      "<p id=\"route-summary\"></p>" +
+      "<button id=\"route-apply\" type=\"button\">Apply route change</button></div>" +
+      "<p id=\"route-result\" role=\"status\"></p></section>" +
       "<section><h3>Administrators</h3>" +
       "<ul id=\"administrator-list\"></ul>" +
       "<form id=\"create-administrator\">" +
@@ -111,6 +218,7 @@
       "<button type=\"submit\">Remove administrator</button>" +
       "<p id=\"remove-administrator-result\" role=\"status\"></p>" +
       "</form></section>";
+    setupRoutes();
     loadAdministrators();
     document.getElementById("create-administrator").addEventListener("submit", async function (ev) {
       ev.preventDefault();
