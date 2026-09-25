@@ -20,7 +20,10 @@
   }
 
   var acceptedRoutes = [];
+  var workingRoutes = [];
   var acceptedRevision = 0;
+  var pendingDraft = null;
+  var draftReviewMode = null;
   var editingRoute = -1;
   var proposedRoutes = null;
 
@@ -33,12 +36,29 @@
       if (!response.ok || !result.ok) throw new Error(result.error || "Routes unavailable");
       acceptedRoutes = result.routes || [];
       acceptedRevision = result.revision;
+      var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+      var draft = await draftResponse.json();
+      if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+      pendingDraft = draft.status === "pending" ? draft : null;
+      workingRoutes = pendingDraft ? pendingDraft.routes : acceptedRoutes;
+      document.getElementById("accepted-route-status").textContent = "Accepted revision " + acceptedRevision;
+      document.getElementById("accepted-route-list").innerHTML = acceptedRoutes.map(function (route) {
+        return "<li>" + esc(route.to) + " via " + esc(route.via) +
+          (route.dev ? " on " + esc(route.dev) : "") + "</li>";
+      }).join("");
+      document.getElementById("draft-status").textContent = pendingDraft
+        ? "Private pending draft based on Accepted revision " + pendingDraft.base_revision +
+          (pendingDraft.stale ? "; stale against current Accepted revision " + acceptedRevision : "")
+        : "No private pending draft";
+      document.getElementById("draft-actions").hidden = !pendingDraft;
+      document.getElementById("draft-reconcile").hidden = !pendingDraft || !pendingDraft.stale;
+      document.getElementById("route-apply").disabled = !!pendingDraft;
       var select = document.getElementById("route-interface");
       select.innerHTML = "<option value=\"\">Automatic</option>" +
         (result.interfaces || []).map(function (name) {
           return "<option value=\"" + esc(name) + "\">" + esc(name) + "</option>";
         }).join("");
-      list.innerHTML = acceptedRoutes.map(function (route, index) {
+      list.innerHTML = workingRoutes.map(function (route, index) {
         return "<li>" + esc(route.to) + " via " + esc(route.via) +
           (route.dev ? " on " + esc(route.dev) : "") +
           " <button type=\"button\" data-edit=\"" + index + "\">Edit</button>" +
@@ -47,7 +67,7 @@
       list.querySelectorAll("[data-edit]").forEach(function (button) {
         button.addEventListener("click", function () {
           editingRoute = Number(button.dataset.edit);
-          var route = acceptedRoutes[editingRoute];
+          var route = workingRoutes[editingRoute];
           document.getElementById("route-destination").value = route.to;
           document.getElementById("route-gateway").value = route.via;
           select.value = route.dev || "";
@@ -57,8 +77,8 @@
       list.querySelectorAll("[data-remove]").forEach(function (button) {
         button.addEventListener("click", function () {
           var index = Number(button.dataset.remove);
-          proposedRoutes = acceptedRoutes.filter(function (_, i) { return i !== index; });
-          showRouteReview("Remove " + acceptedRoutes[index].to + " via " + acceptedRoutes[index].via);
+          proposedRoutes = workingRoutes.filter(function (_, i) { return i !== index; });
+          showRouteReview("Remove " + workingRoutes[index].to + " via " + workingRoutes[index].via);
         });
       });
     } catch (error) {
@@ -68,7 +88,9 @@
 
   function showRouteReview(summary) {
     document.getElementById("route-review").hidden = false;
-    document.getElementById("route-summary").textContent = summary;
+    document.getElementById("route-summary").textContent = summary +
+      ". Review against Accepted revision " +
+      (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
     document.getElementById("route-result").textContent = "";
   }
 
@@ -78,11 +100,37 @@
       event.preventDefault();
       var route = { to: val("route-destination"), via: val("route-gateway") };
       if (val("route-interface")) route.dev = val("route-interface");
-      proposedRoutes = acceptedRoutes.slice();
+      proposedRoutes = workingRoutes.slice();
       if (editingRoute >= 0) proposedRoutes[editingRoute] = route;
       else proposedRoutes.push(route);
       showRouteReview((editingRoute >= 0 ? "Change " : "Add ") + route.to + " via " + route.via +
         (route.dev ? " on " + route.dev : ""));
+    });
+    document.getElementById("route-save-draft").addEventListener("click", async function (event) {
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            routes: proposedRoutes,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        document.getElementById("route-review").hidden = true;
+        document.getElementById("route-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("route-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
     });
     document.getElementById("route-apply").addEventListener("click", async function (event) {
       var button = event.currentTarget;
@@ -109,6 +157,85 @@
         await loadRoutes();
       } catch (_) {
         document.getElementById("route-result").textContent = "Apply outcome unavailable; reload routes before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById("draft-review").addEventListener("click", function () {
+      if (!pendingDraft) return;
+      draftReviewMode = "apply";
+      document.getElementById("draft-review-heading").textContent = "Review pending draft";
+      document.getElementById("draft-review-summary").textContent =
+        "Private pending routes: " + pendingDraft.routes.map(function (route) {
+          return route.to + " via " + route.via;
+        }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
+        "; current Accepted revision " + acceptedRevision + ".";
+      document.getElementById("draft-apply").hidden = false;
+      document.getElementById("draft-reconcile-save").hidden = true;
+      document.getElementById("draft-review-panel").hidden = false;
+    });
+    document.getElementById("draft-apply").addEventListener("click", async function (event) {
+      if (!pendingDraft || draftReviewMode !== "apply") return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/apply", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: pendingDraft.base_revision, version: pendingDraft.version }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("route-result").textContent = response.status === 409
+            ? "Stale draft retained: " + (result.error || "review reconciliation")
+            : "Draft apply failed; draft retained: " + (result.error || "unknown error");
+          await loadRoutes();
+          return;
+        }
+        document.getElementById("draft-review-panel").hidden = true;
+        document.getElementById("route-result").textContent = "Accepted revision " + result.revision;
+        await loadRoutes();
+      } catch (_) {
+        document.getElementById("route-result").textContent = "Apply outcome unavailable; check Accepted revision and private draft.";
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById("draft-reconcile").addEventListener("click", function () {
+      if (!pendingDraft || !pendingDraft.stale) return;
+      draftReviewMode = "reconcile";
+      document.getElementById("draft-review-heading").textContent = "Review reconciliation";
+      document.getElementById("draft-review-summary").textContent =
+        "Current Accepted revision " + acceptedRevision + " routes: " +
+        acceptedRoutes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
+        ". Replace those routes with your private pending routes: " +
+        pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
+        ". Saving does not apply; review the new draft again before applying.";
+      document.getElementById("draft-apply").hidden = true;
+      document.getElementById("draft-reconcile-save").hidden = false;
+      document.getElementById("draft-review-panel").hidden = false;
+    });
+    document.getElementById("draft-reconcile-save").addEventListener("click", async function (event) {
+      if (!pendingDraft || draftReviewMode !== "reconcile") return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/reconcile", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft.base_revision, version: pendingDraft.version,
+            accepted_revision: acceptedRevision, routes: pendingDraft.routes,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "reconciliation unavailable");
+        document.getElementById("draft-review-panel").hidden = true;
+        document.getElementById("route-result").textContent =
+          "Reconciled draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("route-result").textContent = "Reconciliation failed: " + error.message;
       } finally {
         button.disabled = false;
       }
@@ -189,6 +316,16 @@
       ifaces +
       "</ul>" +
       "<section><h3>Static routes</h3>" +
+      "<p id=\"accepted-route-status\"></p>" +
+      "<ul id=\"accepted-route-list\"></ul>" +
+      "<p id=\"draft-status\"></p>" +
+      "<div id=\"draft-actions\" hidden>" +
+      "<button id=\"draft-review\" type=\"button\">Review pending draft</button>" +
+      "<button id=\"draft-reconcile\" type=\"button\" hidden>Review reconciliation</button></div>" +
+      "<div id=\"draft-review-panel\" hidden><h4 id=\"draft-review-heading\"></h4>" +
+      "<p id=\"draft-review-summary\"></p>" +
+      "<button id=\"draft-apply\" type=\"button\" hidden>Apply reviewed draft</button>" +
+      "<button id=\"draft-reconcile-save\" type=\"button\" hidden>Save reconciled draft</button></div>" +
       "<ul id=\"route-list\"></ul>" +
       "<form id=\"route-form\">" +
       "<label>Destination <input id=\"route-destination\" required placeholder=\"198.51.100.0/24\"></label>" +
@@ -197,6 +334,7 @@
       "<button type=\"submit\">Review route</button></form>" +
       "<div id=\"route-review\" hidden><h4>Review route change</h4>" +
       "<p id=\"route-summary\"></p>" +
+      "<button id=\"route-save-draft\" type=\"button\">Save draft</button>" +
       "<button id=\"route-apply\" type=\"button\">Apply route change</button></div>" +
       "<p id=\"route-result\" role=\"status\"></p></section>" +
       "<section><h3>Administrators</h3>" +
