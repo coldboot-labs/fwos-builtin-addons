@@ -144,9 +144,14 @@
         });
         var result = await response.json();
         if (!response.ok || !result.ok) {
+          var recovery = result.restoration === "restored"
+            ? " Previous Accepted network restored."
+            : result.restoration === "failed" || result.restoration === "required"
+              ? " Network restoration needs recovery; check the Appliance console."
+              : "";
           document.getElementById("route-result").textContent =
             (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
-            (result.error || "Route change unavailable");
+            (result.error || "Route change unavailable") + recovery;
           return;
         }
         document.getElementById("route-review").hidden = true;
@@ -186,9 +191,14 @@
         });
         var result = await response.json();
         if (!response.ok || !result.ok) {
+          var recovery = result.restoration === "restored"
+            ? " Previous Accepted network restored."
+            : result.restoration === "failed" || result.restoration === "required"
+              ? " Network restoration needs recovery; check the Appliance console."
+              : "";
           document.getElementById("route-result").textContent = response.status === 409
             ? "Stale draft retained: " + (result.error || "review reconciliation")
-            : "Draft apply failed; draft retained: " + (result.error || "unknown error");
+            : "Draft apply failed; draft retained: " + (result.error || "unknown error") + recovery;
           await loadRoutes();
           return;
         }
