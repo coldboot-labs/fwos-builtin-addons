@@ -34,6 +34,127 @@
   var draftReviewMode = null;
   var editingRoute = -1;
   var proposedRoutes = null;
+  var pendingApply = null;
+  var reviewedPending = null;
+
+  function actorText(actor) {
+    if (!actor) return "Legacy client";
+    return actor.username + " (" + actor.source + ", " + actor.subject + ")";
+  }
+
+  async function loadApplyConfirmation() {
+    var status = document.getElementById("apply-confirmation-status");
+    if (!status) return;
+    try {
+      var response = await fetch("/api/apply-confirmation", { credentials: "same-origin" });
+      var result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Apply confirmation unavailable");
+      pendingApply = result.pending;
+      if (!pendingApply || (reviewedPending && reviewedPending.revision !== pendingApply.revision)) {
+        reviewedPending = null;
+        document.getElementById("pending-apply-review").hidden = true;
+      }
+      document.getElementById("apply-confirmation-enabled").checked = !!result.enabled;
+      document.getElementById("apply-confirmation-revision").value = result.accepted_revision;
+      status.textContent = result.enabled
+        ? "Enabled: new applies need acknowledgement within two minutes."
+        : "Disabled: durable applies are accepted immediately.";
+      var pendingText = document.getElementById("pending-apply-status");
+      pendingText.textContent = pendingApply
+        ? "Pending revision " + pendingApply.revision + " applied by " + actorText(pendingApply.applying) +
+          ". Confirm by " + new Date(pendingApply.expires_at_unix_ms).toLocaleTimeString() +
+          ". Routes: " + (pendingApply.routes || []).map(function (route) { return route.to + " via " + route.via; }).join(", ")
+        : "No revision awaits confirmation.";
+      document.getElementById("review-apply").hidden = !pendingApply;
+      if (result.last_accepted) {
+        document.getElementById("last-apply-actors").textContent =
+          "Accepted revision " + result.last_accepted.revision + " applied by " +
+          actorText(result.last_accepted.applying) +
+          (result.last_accepted.confirming ? "; confirmed by " + actorText(result.last_accepted.confirming) : "");
+      }
+      var routeApply = document.getElementById("route-apply");
+      if (routeApply) routeApply.disabled = !!pendingDraft || !!pendingApply;
+      var draftApply = document.getElementById("draft-apply");
+      if (draftApply) draftApply.disabled = !!pendingApply;
+    } catch (error) {
+      status.textContent = "Could not load Apply confirmation: " + error.message;
+    }
+  }
+
+  function setupApplyConfirmation() {
+    loadApplyConfirmation();
+    document.getElementById("apply-confirmation-form").addEventListener("submit", async function (event) {
+      event.preventDefault();
+      var button = event.currentTarget.querySelector("button");
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/apply-confirmation/configure", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: Number(val("apply-confirmation-revision")),
+            enabled: checked("apply-confirmation-enabled"),
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "setting change failed");
+        document.getElementById("apply-confirmation-result").textContent =
+          result.outcome === "pending_confirmation"
+            ? "Revision " + result.revision + " is pending confirmation."
+            : "Setting accepted in revision " + result.revision;
+        await loadApplyConfirmation();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("apply-confirmation-result").textContent = "Setting change failed: " + error.message;
+        await loadApplyConfirmation();
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById("review-apply").addEventListener("click", function () {
+      if (!pendingApply) return;
+      reviewedPending = pendingApply;
+      document.getElementById("pending-apply-review-heading").textContent =
+        "Review applied revision " + reviewedPending.revision;
+      document.getElementById("pending-apply-review-details").textContent =
+        "Applied by " + actorText(reviewedPending.applying) +
+        ". Previous Accepted revision " + reviewedPending.base_revision +
+        ". Confirm by " + new Date(reviewedPending.expires_at_unix_ms).toLocaleTimeString() + ".\n" +
+        "Apply confirmation setting: " +
+        (reviewedPending.accepted_review.apply_confirmation ? "enabled" : "disabled") + " → " +
+        (reviewedPending.proposed_review.apply_confirmation ? "enabled" : "disabled") + ".\n" +
+        "Routes: " + JSON.stringify(reviewedPending.accepted_review.routes) + " → " +
+        JSON.stringify(reviewedPending.proposed_review.routes) + ".\n" +
+        "Other Desired state (accepted → proposed):\n" +
+        JSON.stringify(reviewedPending.accepted_review, null, 2) + "\n→\n" +
+        JSON.stringify(reviewedPending.proposed_review, null, 2);
+      document.getElementById("pending-apply-review").hidden = false;
+    });
+    document.getElementById("confirm-reviewed-apply").addEventListener("click", async function (event) {
+      if (!reviewedPending || !pendingApply || reviewedPending.revision !== pendingApply.revision) return;
+      var button = event.currentTarget;
+      var revision = reviewedPending.revision;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/apply-confirmation/confirm", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ revision: revision }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "confirmation failed");
+        document.getElementById("apply-confirmation-result").textContent = "Accepted revision " + result.revision;
+        reviewedPending = null;
+        document.getElementById("pending-apply-review").hidden = true;
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("apply-confirmation-result").textContent = "Confirmation failed: " + error.message;
+      } finally {
+        await loadApplyConfirmation();
+      }
+    });
+    setInterval(loadApplyConfirmation, 3000);
+  }
 
   async function loadRoutes() {
     var list = document.getElementById("route-list");
@@ -60,7 +181,7 @@
         : "No private pending draft";
       document.getElementById("draft-actions").hidden = !pendingDraft;
       document.getElementById("draft-reconcile").hidden = !pendingDraft || !pendingDraft.stale;
-      document.getElementById("route-apply").disabled = !!pendingDraft;
+      document.getElementById("route-apply").disabled = !!pendingDraft || !!pendingApply;
       var select = document.getElementById("route-interface");
       select.innerHTML = "<option value=\"\">Automatic</option>" +
         (result.interfaces || []).map(function (name) {
@@ -158,11 +279,14 @@
           return;
         }
         document.getElementById("route-review").hidden = true;
-        document.getElementById("route-result").textContent = "Accepted revision " + result.revision;
+        document.getElementById("route-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
         document.getElementById("route-form").reset();
         editingRoute = -1;
         proposedRoutes = null;
         await loadRoutes();
+        await loadApplyConfirmation();
       } catch (_) {
         document.getElementById("route-result").textContent = "Apply outcome unavailable; reload routes before retrying.";
       } finally {
@@ -201,8 +325,11 @@
           return;
         }
         document.getElementById("draft-review-panel").hidden = true;
-        document.getElementById("route-result").textContent = "Accepted revision " + result.revision;
+        document.getElementById("route-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation; your draft is retained."
+          : "Accepted revision " + result.revision;
         await loadRoutes();
+        await loadApplyConfirmation();
       } catch (_) {
         document.getElementById("route-result").textContent = "Apply outcome unavailable; check Accepted revision and private draft.";
       } finally {
@@ -320,6 +447,20 @@
       "<p>WAN PD: " + esc(st.wan_pd || "") + "</p>" +
       "<p>UI exposure: " + esc(exposure) + "</p>" +
       "<p class=\"muted\">Default policy is applied automatically when a WAN exists.</p>" +
+      "<section><h3>Apply confirmation</h3>" +
+      "<p id=\"apply-confirmation-status\"></p>" +
+      "<form id=\"apply-confirmation-form\">" +
+      "<input id=\"apply-confirmation-revision\" type=\"hidden\">" +
+      "<label><input id=\"apply-confirmation-enabled\" type=\"checkbox\">Require confirmation after Apply</label>" +
+      "<button type=\"submit\">Apply setting</button></form>" +
+      "<p id=\"pending-apply-status\"></p>" +
+      "<button id=\"review-apply\" type=\"button\" hidden>Review pending revision</button>" +
+      "<div id=\"pending-apply-review\" hidden>" +
+      "<h4 id=\"pending-apply-review-heading\"></h4>" +
+      "<pre id=\"pending-apply-review-details\" style=\"white-space:pre-wrap;overflow-wrap:anywhere\"></pre>" +
+      "<button id=\"confirm-reviewed-apply\" type=\"button\">Confirm reviewed revision</button></div>" +
+      "<p id=\"last-apply-actors\"></p>" +
+      "<p id=\"apply-confirmation-result\" role=\"status\"></p></section>" +
       "<h3>NICs</h3><ul>" +
       ifaces +
       "</ul>" +
@@ -365,6 +506,7 @@
       "<p id=\"remove-administrator-result\" role=\"status\"></p>" +
       "</form></section>";
     setupRoutes();
+    setupApplyConfirmation();
     loadAdministrators();
     document.getElementById("create-administrator").addEventListener("submit", async function (ev) {
       ev.preventDefault();
