@@ -33,9 +33,22 @@
   var pendingDraft = null;
   var draftReviewMode = null;
   var editingRoute = -1;
+  var editingOriginal = null;
+  var routeEditBaseRevision = null;
+  var routeFormDirty = false;
+  var removingRoute = null;
+  var removingBaseRevision = null;
   var proposedRoutes = null;
   var pendingApply = null;
   var reviewedPending = null;
+
+  function updateRouteShortcutAvailability() {
+    var review = document.getElementById("route-review");
+    var shortcut = document.getElementById("route-save-and-apply");
+    if (shortcut) shortcut.disabled = !!pendingDraft || !!pendingApply || !review.hidden;
+    var removeShortcut = document.getElementById("route-remove-save-and-apply");
+    if (removeShortcut) removeShortcut.disabled = !!pendingDraft || !!pendingApply || !removingRoute || routeFormDirty;
+  }
 
   function actorText(actor) {
     if (!actor) return "Legacy client";
@@ -77,6 +90,7 @@
       if (routeApply) routeApply.disabled = !!pendingDraft || !!pendingApply;
       var draftApply = document.getElementById("draft-apply");
       if (draftApply) draftApply.disabled = !!pendingApply;
+      updateRouteShortcutAvailability();
     } catch (error) {
       status.textContent = "Could not load Apply confirmation: " + error.message;
     }
@@ -186,6 +200,7 @@
       document.getElementById("draft-actions").hidden = !pendingDraft;
       document.getElementById("draft-reconcile").hidden = !pendingDraft || !pendingDraft.stale;
       document.getElementById("route-apply").disabled = !!pendingDraft || !!pendingApply;
+      updateRouteShortcutAvailability();
       var select = document.getElementById("route-interface");
       select.innerHTML = "<option value=\"\">Automatic</option>" +
         (result.interfaces || []).map(function (name) {
@@ -200,18 +215,29 @@
       list.querySelectorAll("[data-edit]").forEach(function (button) {
         button.addEventListener("click", function () {
           editingRoute = Number(button.dataset.edit);
+          editingOriginal = acceptedRoutes[editingRoute] ? Object.assign({}, acceptedRoutes[editingRoute]) : null;
+          routeEditBaseRevision = acceptedRevision;
+          removingRoute = null;
+          removingBaseRevision = null;
           var route = workingRoutes[editingRoute];
           document.getElementById("route-destination").value = route.to;
           document.getElementById("route-gateway").value = route.via;
           select.value = route.dev || "";
+          routeFormDirty = true;
+          updateRouteShortcutAvailability();
           document.getElementById("route-destination").focus();
         });
       });
       list.querySelectorAll("[data-remove]").forEach(function (button) {
         button.addEventListener("click", function () {
           var index = Number(button.dataset.remove);
+          removingRoute = Object.assign({}, workingRoutes[index]);
+          removingBaseRevision = acceptedRevision;
           proposedRoutes = workingRoutes.filter(function (_, i) { return i !== index; });
           showRouteReview("Remove " + workingRoutes[index].to + " via " + workingRoutes[index].via);
+          document.getElementById("route-remove-save-and-apply").hidden = false;
+          if (routeFormDirty) document.getElementById("route-result").textContent =
+            "Finish or cancel the unfinished route edit before using Save and apply for removal.";
         });
       });
     } catch (error) {
@@ -221,16 +247,43 @@
 
   function showRouteReview(summary) {
     document.getElementById("route-review").hidden = false;
+    document.getElementById("route-remove-save-and-apply").hidden = !removingRoute;
     document.getElementById("route-summary").textContent = summary +
       ". Review against Accepted revision " +
       (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
     document.getElementById("route-result").textContent = "";
+    updateRouteShortcutAvailability();
   }
 
   function setupRoutes() {
+    editingRoute = -1;
+    editingOriginal = null;
+    routeEditBaseRevision = null;
+    routeFormDirty = false;
+    removingRoute = null;
+    removingBaseRevision = null;
     loadRoutes();
+    document.getElementById("route-form").addEventListener("input", function () {
+      if (routeEditBaseRevision === null) routeEditBaseRevision = acceptedRevision;
+      routeFormDirty = true;
+      updateRouteShortcutAvailability();
+    });
+    document.getElementById("route-form").addEventListener("change", function () {
+      if (routeEditBaseRevision === null) routeEditBaseRevision = acceptedRevision;
+      routeFormDirty = true;
+      updateRouteShortcutAvailability();
+    });
+    document.getElementById("route-cancel-edit").addEventListener("click", function () {
+      document.getElementById("route-form").reset();
+      editingRoute = -1;
+      editingOriginal = null;
+      routeEditBaseRevision = null;
+      routeFormDirty = false;
+      updateRouteShortcutAvailability();
+    });
     document.getElementById("route-form").addEventListener("submit", function (event) {
       event.preventDefault();
+      removingRoute = null;
       var route = { to: val("route-destination"), via: val("route-gateway") };
       if (val("route-interface")) route.dev = val("route-interface");
       proposedRoutes = workingRoutes.slice();
@@ -238,6 +291,64 @@
       else proposedRoutes.push(route);
       showRouteReview((editingRoute >= 0 ? "Change " : "Add ") + route.to + " via " + route.via +
         (route.dev ? " on " + route.dev : ""));
+    });
+    async function applyStandalone(change, button) {
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/routes/save-and-apply", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(change),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("route-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "Route change unavailable") + recoveryText(result);
+          return;
+        }
+        document.getElementById("route-review").hidden = true;
+        document.getElementById("route-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        document.getElementById("route-form").reset();
+        editingRoute = -1;
+        editingOriginal = null;
+        routeEditBaseRevision = null;
+        routeFormDirty = false;
+        removingRoute = null;
+        removingBaseRevision = null;
+        proposedRoutes = null;
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("route-result").textContent = "Apply outcome unavailable; reload routes before retrying.";
+      } finally {
+        updateRouteShortcutAvailability();
+      }
+    }
+    document.getElementById("route-save-and-apply").addEventListener("click", async function (event) {
+      if (pendingDraft || pendingApply || !document.getElementById("route-review").hidden) return;
+      if (!document.getElementById("route-form").reportValidity()) return;
+      var route = { to: val("route-destination"), via: val("route-gateway") };
+      if (val("route-interface")) route.dev = val("route-interface");
+      var change = {
+        base_revision: routeEditBaseRevision === null ? acceptedRevision : routeEditBaseRevision,
+        action: editingRoute >= 0 ? "change" : "add", route: route,
+      };
+      if (editingRoute >= 0) change.original = editingOriginal;
+      await applyStandalone(change, event.currentTarget);
+    });
+    document.getElementById("route-remove-save-and-apply").addEventListener("click", async function (event) {
+      if (pendingDraft || pendingApply || !removingRoute || routeFormDirty) return;
+      await applyStandalone({ base_revision: removingBaseRevision, action: "remove", original: removingRoute }, event.currentTarget);
+    });
+    document.getElementById("route-cancel-review").addEventListener("click", function () {
+      document.getElementById("route-review").hidden = true;
+      proposedRoutes = null;
+      removingRoute = null;
+      removingBaseRevision = null;
+      updateRouteShortcutAvailability();
     });
     document.getElementById("route-save-draft").addEventListener("click", async function (event) {
       var button = event.currentTarget;
@@ -256,6 +367,13 @@
         var result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
         document.getElementById("route-review").hidden = true;
+        document.getElementById("route-form").reset();
+        editingRoute = -1;
+        editingOriginal = null;
+        routeEditBaseRevision = null;
+        routeFormDirty = false;
+        removingRoute = null;
+        removingBaseRevision = null;
         document.getElementById("route-result").textContent =
           "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
         await loadRoutes();
@@ -283,11 +401,16 @@
           return;
         }
         document.getElementById("route-review").hidden = true;
+        removingRoute = null;
+        removingBaseRevision = null;
         document.getElementById("route-result").textContent = result.outcome === "pending_confirmation"
           ? "Revision " + result.revision + " is pending confirmation."
           : "Accepted revision " + result.revision;
         document.getElementById("route-form").reset();
         editingRoute = -1;
+        editingOriginal = null;
+        routeEditBaseRevision = null;
+        routeFormDirty = false;
         proposedRoutes = null;
         await loadRoutes();
         await loadApplyConfirmation();
@@ -484,11 +607,15 @@
       "<label>Destination <input id=\"route-destination\" required placeholder=\"198.51.100.0/24\"></label>" +
       "<label>Next hop <input id=\"route-gateway\" required placeholder=\"192.0.2.2\"></label>" +
       "<label for=\"route-interface\">Interface</label> <select id=\"route-interface\"></select>" +
-      "<button type=\"submit\">Review route</button></form>" +
+      "<button type=\"submit\">Review route</button>" +
+      "<button id=\"route-cancel-edit\" type=\"button\">Cancel route edit</button></form>" +
+      "<button id=\"route-save-and-apply\" type=\"button\">Save and apply</button>" +
       "<div id=\"route-review\" hidden><h4>Review route change</h4>" +
       "<p id=\"route-summary\"></p>" +
       "<button id=\"route-save-draft\" type=\"button\">Save draft</button>" +
-      "<button id=\"route-apply\" type=\"button\">Apply route change</button></div>" +
+      "<button id=\"route-apply\" type=\"button\">Apply route change</button>" +
+      "<button id=\"route-remove-save-and-apply\" type=\"button\" hidden>Save and apply</button>" +
+      "<button id=\"route-cancel-review\" type=\"button\">Cancel review</button></div>" +
       "<p id=\"route-result\" role=\"status\"></p></section>" +
       "<section><h3>Administrators</h3>" +
       "<ul id=\"administrator-list\"></ul>" +
