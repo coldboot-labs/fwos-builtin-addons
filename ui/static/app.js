@@ -48,6 +48,17 @@
     if (shortcut) shortcut.disabled = !!pendingDraft || !!pendingApply || !review.hidden;
     var removeShortcut = document.getElementById("route-remove-save-and-apply");
     if (removeShortcut) removeShortcut.disabled = !!pendingDraft || !!pendingApply || !removingRoute || routeFormDirty;
+    document.querySelectorAll("#route-list [data-edit], #route-list [data-remove]").forEach(function (button) {
+      button.disabled = routeFormDirty || !review.hidden;
+    });
+  }
+
+  function resetRouteForm() {
+    document.getElementById("route-form").reset();
+    editingRoute = -1;
+    editingOriginal = null;
+    routeEditBaseRevision = null;
+    routeFormDirty = false;
   }
 
   function actorText(actor) {
@@ -214,6 +225,7 @@
       }).join("");
       list.querySelectorAll("[data-edit]").forEach(function (button) {
         button.addEventListener("click", function () {
+          if (routeFormDirty || !document.getElementById("route-review").hidden) return;
           editingRoute = Number(button.dataset.edit);
           editingOriginal = acceptedRoutes[editingRoute] ? Object.assign({}, acceptedRoutes[editingRoute]) : null;
           routeEditBaseRevision = acceptedRevision;
@@ -230,16 +242,16 @@
       });
       list.querySelectorAll("[data-remove]").forEach(function (button) {
         button.addEventListener("click", function () {
+          if (routeFormDirty || !document.getElementById("route-review").hidden) return;
           var index = Number(button.dataset.remove);
           removingRoute = Object.assign({}, workingRoutes[index]);
           removingBaseRevision = acceptedRevision;
           proposedRoutes = workingRoutes.filter(function (_, i) { return i !== index; });
           showRouteReview("Remove " + workingRoutes[index].to + " via " + workingRoutes[index].via);
           document.getElementById("route-remove-save-and-apply").hidden = false;
-          if (routeFormDirty) document.getElementById("route-result").textContent =
-            "Finish or cancel the unfinished route edit before using Save and apply for removal.";
         });
       });
+      updateRouteShortcutAvailability();
     } catch (error) {
       document.getElementById("route-result").textContent = "Could not load Accepted routes: " + error.message;
     }
@@ -263,22 +275,15 @@
     removingRoute = null;
     removingBaseRevision = null;
     loadRoutes();
-    document.getElementById("route-form").addEventListener("input", function () {
+    function markRouteFormDirty() {
       if (routeEditBaseRevision === null) routeEditBaseRevision = acceptedRevision;
       routeFormDirty = true;
       updateRouteShortcutAvailability();
-    });
-    document.getElementById("route-form").addEventListener("change", function () {
-      if (routeEditBaseRevision === null) routeEditBaseRevision = acceptedRevision;
-      routeFormDirty = true;
-      updateRouteShortcutAvailability();
-    });
+    }
+    document.getElementById("route-form").addEventListener("input", markRouteFormDirty);
+    document.getElementById("route-form").addEventListener("change", markRouteFormDirty);
     document.getElementById("route-cancel-edit").addEventListener("click", function () {
-      document.getElementById("route-form").reset();
-      editingRoute = -1;
-      editingOriginal = null;
-      routeEditBaseRevision = null;
-      routeFormDirty = false;
+      resetRouteForm();
       updateRouteShortcutAvailability();
     });
     document.getElementById("route-form").addEventListener("submit", function (event) {
@@ -311,11 +316,7 @@
         document.getElementById("route-result").textContent = result.outcome === "pending_confirmation"
           ? "Revision " + result.revision + " is pending confirmation."
           : "Accepted revision " + result.revision;
-        document.getElementById("route-form").reset();
-        editingRoute = -1;
-        editingOriginal = null;
-        routeEditBaseRevision = null;
-        routeFormDirty = false;
+        resetRouteForm();
         removingRoute = null;
         removingBaseRevision = null;
         proposedRoutes = null;
@@ -367,11 +368,7 @@
         var result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
         document.getElementById("route-review").hidden = true;
-        document.getElementById("route-form").reset();
-        editingRoute = -1;
-        editingOriginal = null;
-        routeEditBaseRevision = null;
-        routeFormDirty = false;
+        resetRouteForm();
         removingRoute = null;
         removingBaseRevision = null;
         document.getElementById("route-result").textContent =
@@ -406,11 +403,7 @@
         document.getElementById("route-result").textContent = result.outcome === "pending_confirmation"
           ? "Revision " + result.revision + " is pending confirmation."
           : "Accepted revision " + result.revision;
-        document.getElementById("route-form").reset();
-        editingRoute = -1;
-        editingOriginal = null;
-        routeEditBaseRevision = null;
-        routeFormDirty = false;
+        resetRouteForm();
         proposedRoutes = null;
         await loadRoutes();
         await loadApplyConfirmation();
