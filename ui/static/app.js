@@ -421,7 +421,8 @@
         "Private pending routes: " + pendingDraft.routes.map(function (route) {
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
-        "; current Accepted revision " + acceptedRevision + ".";
+        "; current Accepted revision " + acceptedRevision + "." +
+        interfaceDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -465,7 +466,8 @@
         acceptedRoutes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
-        ". Saving does not apply; review the new draft again before applying.";
+        ". Saving does not apply; review the new draft again before applying." +
+        interfaceDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -478,10 +480,7 @@
         var response = await fetch("/api/draft/reconcile", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            base_revision: pendingDraft.base_revision, version: pendingDraft.version,
-            accepted_revision: acceptedRevision, routes: pendingDraft.routes,
-          }),
+          body: JSON.stringify(reconcilePayload()),
         });
         var result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "reconciliation unavailable");
@@ -494,6 +493,262 @@
       } finally {
         button.disabled = false;
       }
+    });
+  }
+
+  function interfaceDraftText(draft) {
+    if (!draft || !(draft.sections || []).some(function (section) { return section === "interfaces"; })) {
+      return "";
+    }
+    return " Interfaces: " + (draft.interfaces || []).map(function (iface) {
+      return iface.name + " " + (iface.role || "unset") +
+        (iface.vlan ? " vlan " + iface.vlan : "") +
+        (iface.addresses && iface.addresses.length ? " " + iface.addresses.join(" ") : "");
+    }).join(", ") + ". UI exposure: " + (draft.ui_exposure || []).join(", ") + ".";
+  }
+
+  function reconcilePayload() {
+    var payload = {
+      base_revision: pendingDraft.base_revision,
+      version: pendingDraft.version,
+      accepted_revision: acceptedRevision,
+      routes: pendingDraft.routes,
+    };
+    if ((pendingDraft.sections || []).indexOf("interfaces") >= 0) {
+      payload.interfaces = pendingDraft.interfaces;
+      payload.ui_exposure = pendingDraft.ui_exposure;
+    }
+    return payload;
+  }
+
+  var interfaceNics = [];
+  var proposedInterfaces = null;
+
+  function parentOptions(selected) {
+    var names = interfaceNics.map(function (nic) { return nic.name; });
+    return "<option value=\"\"></option>" + names.map(function (name) {
+      return "<option value=\"" + esc(name) + "\"" + (name === selected ? " selected" : "") + ">" + esc(name) + "</option>";
+    }).join("");
+  }
+
+  function roleOptions(selected) {
+    return ["wan", "lan", "mgmt", "unused"].map(function (role) {
+      return "<option value=\"" + role + "\"" + (role === selected ? " selected" : "") + ">" + role + "</option>";
+    }).join("");
+  }
+
+  function syncInterfaceRow(row) {
+    var role = row.querySelector("[data-field=role]").value;
+    var vlan = row.querySelector("[data-field=vlan]");
+    var parent = row.querySelector("[data-field=parent]");
+    var dhcp = row.querySelector("[data-field=dhcp]");
+    var expose = row.querySelector("[data-field=expose]");
+    var mgmt = role === "mgmt";
+    var wan = role === "wan";
+    vlan.disabled = mgmt;
+    parent.disabled = mgmt;
+    dhcp.disabled = mgmt;
+    if (mgmt) {
+      var parentName = parent.value;
+      vlan.value = "";
+      parent.value = "";
+      dhcp.checked = false;
+      expose.checked = true;
+      var name = row.querySelector("[data-field=name]");
+      if (parentName) name.value = parentName;
+      else if (name.value.indexOf(".") >= 0) name.value = name.value.split(".")[0];
+      name.readOnly = true;
+    }
+    if (wan) expose.checked = false;
+    expose.disabled = mgmt || wan;
+    row.querySelector("[data-remove]").hidden = !vlan.value;
+  }
+
+  function interfaceRow(iface, exposure) {
+    var vlan = iface.vlan || "";
+    var row = document.createElement("div");
+    row.className = "nic";
+    row.setAttribute("data-interface-row", "");
+    row.innerHTML =
+      "<label>Name <input data-field=\"name\" value=\"" + esc(iface.name || "") + "\"" + (vlan ? "" : " readonly") + "></label>" +
+      "<label>Role <select data-field=\"role\">" + roleOptions(iface.role || "unused") + "</select></label>" +
+      "<label>Addresses <input data-field=\"addresses\" value=\"" + esc((iface.addresses || []).join(" ")) + "\" placeholder=\"203.0.113.1/24\"></label>" +
+      "<label><input data-field=\"dhcp\" type=\"checkbox\"" + (iface.dhcp ? " checked" : "") + "> DHCP</label>" +
+      "<label>Parent <select data-field=\"parent\">" + parentOptions(iface.parent || "") + "</select></label>" +
+      "<label>VLAN <input data-field=\"vlan\" value=\"" + esc(vlan) + "\" inputmode=\"numeric\"></label>" +
+      "<label><input data-field=\"expose\" type=\"checkbox\"" +
+      ((exposure || []).indexOf(iface.name) >= 0 ? " checked" : "") + "> UI exposure</label>" +
+      "<button type=\"button\" data-remove>Remove VLAN</button>";
+    row.querySelector("[data-field=role]").addEventListener("change", function () { syncInterfaceRow(row); });
+    row.querySelector("[data-field=vlan]").addEventListener("input", function () { syncInterfaceRow(row); });
+    row.querySelector("[data-remove]").addEventListener("click", function () { row.remove(); });
+    syncInterfaceRow(row);
+    return row;
+  }
+
+  function collectInterfaces() {
+    var interfaces = [];
+    var exposure = [];
+    document.querySelectorAll("#interface-rows [data-interface-row]").forEach(function (row) {
+      var name = row.querySelector("[data-field=name]").value.trim();
+      if (!name) return;
+      var role = row.querySelector("[data-field=role]").value;
+      var addresses = row.querySelector("[data-field=addresses]").value.split(/[\s,]+/).filter(Boolean);
+      var vlanRaw = row.querySelector("[data-field=vlan]").value.trim();
+      var parent = row.querySelector("[data-field=parent]").value;
+      var iface = { name: name, role: role };
+      if (addresses.length) iface.addresses = addresses;
+      if (row.querySelector("[data-field=dhcp]").checked) iface.dhcp = true;
+      if (vlanRaw) {
+        iface.vlan = parseInt(vlanRaw, 10);
+        if (parent) iface.parent = parent;
+      }
+      interfaces.push(iface);
+      if (row.querySelector("[data-field=expose]").checked) exposure.push(name);
+    });
+    return { interfaces: interfaces, ui_exposure: exposure };
+  }
+
+  function interfaceSummary(proposal) {
+    return (proposal.interfaces || []).map(function (iface) {
+      return iface.name + " " + (iface.role || "unset") +
+        (iface.vlan ? " vlan " + iface.vlan + (iface.parent ? " on " + iface.parent : "") : "") +
+        (iface.addresses ? " " + iface.addresses.join(" ") : "") +
+        (iface.dhcp ? " dhcp" : "");
+    }).join(", ") + ". UI exposure: " + (proposal.ui_exposure || []).join(", ") +
+      ". Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
+  }
+
+  async function loadInterfaces() {
+    var rows = document.getElementById("interface-rows");
+    if (!rows) return;
+    var response = await fetch("/api/interfaces", { credentials: "same-origin" });
+    var result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "Interfaces unavailable");
+    var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+    var draft = await draftResponse.json();
+    if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+    pendingDraft = draft.status === "pending" ? draft : null;
+    acceptedRevision = result.revision;
+    interfaceNics = result.nics || [];
+    var working = pendingDraft ? pendingDraft.interfaces : result.interfaces;
+    var exposure = pendingDraft ? pendingDraft.ui_exposure : result.ui_exposure;
+    document.getElementById("accepted-interface-status").textContent =
+      "Accepted revision " + result.revision + ". LAN prefix " + (result.lan_prefix || "");
+    document.getElementById("interface-draft-note").textContent = pendingDraft
+      ? "Editing the private draft based on Accepted revision " + pendingDraft.base_revision
+      : "No private pending draft";
+    document.getElementById("interface-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
+    document.getElementById("interface-apply").disabled = !!pendingDraft || !!pendingApply;
+    rows.innerHTML = "";
+    (working || []).forEach(function (iface) {
+      rows.appendChild(interfaceRow(iface, exposure));
+    });
+    interfaceNics.forEach(function (nic) {
+      if (![].some.call(rows.querySelectorAll("[data-field=name]"), function (input) { return input.value === nic.name; })) {
+        rows.appendChild(interfaceRow({ name: nic.name, role: "unused", addresses: [] }, exposure));
+      }
+    });
+  }
+
+  function setupInterfaces() {
+    proposedInterfaces = null;
+    var review = document.getElementById("interface-review-panel");
+    loadInterfaces().catch(function (error) {
+      var result = document.getElementById("interface-result");
+      if (result) result.textContent = "Could not load interfaces: " + error.message;
+    });
+    document.getElementById("interface-add-vlan").addEventListener("click", function () {
+      var parent = interfaceNics[0] ? interfaceNics[0].name : "";
+      var vlan = 20;
+      document.getElementById("interface-rows").appendChild(interfaceRow({
+        name: parent ? parent + "." + vlan : "",
+        role: "lan",
+        parent: parent,
+        vlan: vlan,
+        addresses: [],
+      }, []));
+    });
+    document.getElementById("interface-review").addEventListener("click", function () {
+      proposedInterfaces = collectInterfaces();
+      document.getElementById("interface-summary").textContent = interfaceSummary(proposedInterfaces);
+      review.hidden = false;
+      document.getElementById("interface-result").textContent = "";
+    });
+    document.getElementById("interface-cancel-review").addEventListener("click", function () {
+      review.hidden = true;
+      proposedInterfaces = null;
+    });
+    document.getElementById("interface-save-draft").addEventListener("click", async function (event) {
+      if (!proposedInterfaces) return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            interfaces: proposedInterfaces.interfaces,
+            ui_exposure: proposedInterfaces.ui_exposure,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        review.hidden = true;
+        document.getElementById("interface-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadInterfaces();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("interface-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function applyInterfaceProposal(path, button) {
+      if (!proposedInterfaces && path.indexOf("save-and-apply") < 0) return;
+      var proposal = path.indexOf("save-and-apply") >= 0 ? collectInterfaces() : proposedInterfaces;
+      button.disabled = true;
+      try {
+        var response = await fetch(path, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: acceptedRevision,
+            interfaces: proposal.interfaces,
+            ui_exposure: proposal.ui_exposure,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("interface-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "Interface change unavailable") + recoveryText(result);
+          return;
+        }
+        review.hidden = true;
+        proposedInterfaces = null;
+        document.getElementById("interface-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        await loadInterfaces();
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("interface-result").textContent = "Apply outcome unavailable; reload interfaces before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.getElementById("interface-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyInterfaceProposal("/api/interfaces/apply", event.currentTarget);
+    });
+    document.getElementById("interface-save-and-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyInterfaceProposal("/api/interfaces/save-and-apply", event.currentTarget);
     });
   }
 
@@ -584,6 +839,19 @@
       "<h3>NICs</h3><ul>" +
       ifaces +
       "</ul>" +
+      "<section><h3>Interfaces</h3>" +
+      "<p id=\"accepted-interface-status\"></p>" +
+      "<p id=\"interface-draft-note\"></p>" +
+      "<div id=\"interface-rows\"></div>" +
+      "<button id=\"interface-add-vlan\" type=\"button\">Add VLAN</button>" +
+      "<button id=\"interface-review\" type=\"button\">Review interfaces</button>" +
+      "<button id=\"interface-save-and-apply\" type=\"button\">Save and apply interfaces</button>" +
+      "<div id=\"interface-review-panel\" hidden><h4>Review interface change</h4>" +
+      "<p id=\"interface-summary\"></p>" +
+      "<button id=\"interface-save-draft\" type=\"button\">Save interface draft</button>" +
+      "<button id=\"interface-apply\" type=\"button\">Apply interface change</button>" +
+      "<button id=\"interface-cancel-review\" type=\"button\">Cancel interface review</button></div>" +
+      "<p id=\"interface-result\" role=\"status\"></p></section>" +
       "<section><h3>Static routes</h3>" +
       "<p id=\"accepted-route-status\"></p>" +
       "<ul id=\"accepted-route-list\"></ul>" +
@@ -629,6 +897,7 @@
       "<button type=\"submit\">Remove administrator</button>" +
       "<p id=\"remove-administrator-result\" role=\"status\"></p>" +
       "</form></section>";
+    setupInterfaces();
     setupRoutes();
     setupApplyConfirmation();
     loadAdministrators();
