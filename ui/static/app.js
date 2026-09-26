@@ -50,7 +50,8 @@
       var result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || "Apply confirmation unavailable");
       pendingApply = result.pending;
-      if (!pendingApply || (reviewedPending && reviewedPending.revision !== pendingApply.revision)) {
+      if (!pendingApply || (reviewedPending &&
+          (reviewedPending.revision !== pendingApply.revision || reviewedPending.confirmation_id !== pendingApply.confirmation_id))) {
         reviewedPending = null;
         document.getElementById("pending-apply-review").hidden = true;
       }
@@ -112,12 +113,12 @@
       }
     });
     document.getElementById("review-apply").addEventListener("click", function () {
-      if (!pendingApply) return;
+      if (!pendingApply || !pendingApply.confirmation_id) return;
       reviewedPending = pendingApply;
       document.getElementById("pending-apply-review-heading").textContent =
         "Review applied revision " + reviewedPending.revision;
       document.getElementById("pending-apply-review-details").textContent =
-        "Applied by " + actorText(reviewedPending.applying) +
+        "Confirmation ID: " + reviewedPending.confirmation_id + ". Applied by " + actorText(reviewedPending.applying) +
         ". Previous Accepted revision " + reviewedPending.base_revision +
         ". Confirm by " + new Date(reviewedPending.expires_at_unix_ms).toLocaleTimeString() + ".\n" +
         "Apply confirmation setting: " +
@@ -131,15 +132,18 @@
       document.getElementById("pending-apply-review").hidden = false;
     });
     document.getElementById("confirm-reviewed-apply").addEventListener("click", async function (event) {
-      if (!reviewedPending || !pendingApply || reviewedPending.revision !== pendingApply.revision) return;
+      if (!reviewedPending || !pendingApply ||
+          reviewedPending.revision !== pendingApply.revision ||
+          reviewedPending.confirmation_id !== pendingApply.confirmation_id) return;
       var button = event.currentTarget;
       var revision = reviewedPending.revision;
+      var confirmationId = reviewedPending.confirmation_id;
       button.disabled = true;
       try {
         var response = await fetch("/api/apply-confirmation/confirm", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ revision: revision }),
+          body: JSON.stringify({ revision: revision, confirmation_id: confirmationId }),
         });
         var result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "confirmation failed");
