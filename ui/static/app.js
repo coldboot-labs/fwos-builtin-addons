@@ -422,7 +422,7 @@
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
         "; current Accepted revision " + acceptedRevision + "." +
-        interfaceDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -467,7 +467,7 @@
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Saving does not apply; review the new draft again before applying." +
-        interfaceDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -518,7 +518,25 @@
       payload.interfaces = pendingDraft.interfaces;
       payload.ui_exposure = pendingDraft.ui_exposure;
     }
+    if ((pendingDraft.sections || []).indexOf("services") >= 0) {
+      payload.services = {
+        lan_prefix: pendingDraft.lan_prefix || "",
+        dhcp_pool: pendingDraft.dhcp_pool || "",
+        wan_pd: pendingDraft.wan_pd || "",
+      };
+    }
     return payload;
+  }
+
+  function serviceDraftText(draft) {
+    if (!draft || !(draft.sections || []).some(function (section) { return section === "services"; })) {
+      return "";
+    }
+    return " " + serviceSummary({
+      lan_prefix: draft.lan_prefix || "",
+      dhcp_pool: draft.dhcp_pool || "",
+      wan_pd: draft.wan_pd || "",
+    }).replace(/ Review against Accepted revision .*$/, ".");
   }
 
   var interfaceNics = [];
@@ -752,6 +770,138 @@
     });
   }
 
+  function prefixHost(prefix) {
+    var parts = String(prefix || "").split("/")[0].split(".");
+    if (parts.length !== 4 || parts.some(function (part) { return part === "" || Number(part) > 255; })) return "";
+    if (parts[3] === "0") parts[3] = "1";
+    return parts.join(".");
+  }
+
+  function collectServices() {
+    return {
+      lan_prefix: val("service-prefix"),
+      dhcp_pool: val("service-pool"),
+      wan_pd: val("service-pd"),
+    };
+  }
+
+  function serviceSummary(services) {
+    return "LAN prefix " + services.lan_prefix + ". DHCP pool " + services.dhcp_pool +
+      ". WAN prefix delegation " + (services.wan_pd || "none") +
+      ". DNS resolver " + (prefixHost(services.lan_prefix) || "none") +
+      ". Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
+  }
+
+  async function loadLanServices() {
+    var status = document.getElementById("accepted-service-status");
+    if (!status) return;
+    var response = await fetch("/api/lan-services", { credentials: "same-origin" });
+    var result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "LAN services unavailable");
+    var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+    var draft = await draftResponse.json();
+    if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+    pendingDraft = draft.status === "pending" ? draft : null;
+    acceptedRevision = result.revision;
+    var prefix = pendingDraft ? (pendingDraft.lan_prefix || "") : (result.lan_prefix || "");
+    var pool = pendingDraft ? (pendingDraft.dhcp_pool || "") : (result.dhcp_pool || "");
+    var pd = pendingDraft ? (pendingDraft.wan_pd || "") : (result.wan_pd || "");
+    document.getElementById("service-prefix").value = prefix;
+    document.getElementById("service-pool").value = pool;
+    document.getElementById("service-pd").value = pd;
+    status.textContent = "Accepted revision " + result.revision +
+      (result.lan ? ". Services follow " + result.lan : "");
+    document.getElementById("service-dns").textContent =
+      "DNS resolver " + (prefixHost(result.lan_prefix) || "none") + " is advertised to DHCP clients.";
+    document.getElementById("service-draft-note").textContent = pendingDraft
+      ? "Editing the private draft based on Accepted revision " + pendingDraft.base_revision
+      : "No private pending draft";
+    document.getElementById("service-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
+    document.getElementById("service-apply").disabled = !!pendingDraft || !!pendingApply;
+  }
+
+  function setupLanServices() {
+    var review = document.getElementById("service-review-panel");
+    var proposed = null;
+    loadLanServices().catch(function (error) {
+      var result = document.getElementById("service-result");
+      if (result) result.textContent = "Could not load LAN services: " + error.message;
+    });
+    document.getElementById("service-review").addEventListener("click", function () {
+      proposed = collectServices();
+      document.getElementById("service-summary").textContent = serviceSummary(proposed);
+      review.hidden = false;
+      document.getElementById("service-result").textContent = "";
+    });
+    document.getElementById("service-save-draft").addEventListener("click", async function (event) {
+      if (!proposed) return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            services: proposed,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        review.hidden = true;
+        document.getElementById("service-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadLanServices();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("service-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function applyServices(path, button) {
+      var services = path.indexOf("save-and-apply") >= 0 ? collectServices() : proposed;
+      if (!services) return;
+      button.disabled = true;
+      try {
+        var response = await fetch(path, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, services: services }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("service-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "LAN service change unavailable") + recoveryText(result);
+          return;
+        }
+        review.hidden = true;
+        proposed = null;
+        document.getElementById("service-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        await loadLanServices();
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("service-result").textContent =
+          "Apply outcome unavailable; reload LAN services before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.getElementById("service-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyServices("/api/lan-services/apply", event.currentTarget);
+    });
+    document.getElementById("service-save-and-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyServices("/api/lan-services/save-and-apply", event.currentTarget);
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -852,6 +1002,22 @@
       "<button id=\"interface-apply\" type=\"button\">Apply interface change</button>" +
       "<button id=\"interface-cancel-review\" type=\"button\">Cancel interface review</button></div>" +
       "<p id=\"interface-result\" role=\"status\"></p></section>" +
+      "<section><h3>LAN services</h3>" +
+      "<p id=\"accepted-service-status\"></p>" +
+      "<p id=\"service-dns\"></p>" +
+      "<p id=\"service-draft-note\"></p>" +
+      "<form id=\"service-form\">" +
+      "<label>LAN prefix <input id=\"service-prefix\" placeholder=\"192.168.1.0/24\"></label>" +
+      "<label>DHCP pool <input id=\"service-pool\" placeholder=\"192.168.1.100-192.168.1.200\"></label>" +
+      "<label>WAN prefix delegation <input id=\"service-pd\" placeholder=\"2001:db8:1::/56\"></label>" +
+      "</form>" +
+      "<button id=\"service-review\" type=\"button\">Review LAN services</button>" +
+      "<button id=\"service-save-and-apply\" type=\"button\">Save and apply LAN services</button>" +
+      "<div id=\"service-review-panel\" hidden><h4>Review LAN services</h4>" +
+      "<p id=\"service-summary\"></p>" +
+      "<button id=\"service-save-draft\" type=\"button\">Save LAN service draft</button>" +
+      "<button id=\"service-apply\" type=\"button\">Apply LAN services</button></div>" +
+      "<p id=\"service-result\" role=\"status\"></p></section>" +
       "<section><h3>Static routes</h3>" +
       "<p id=\"accepted-route-status\"></p>" +
       "<ul id=\"accepted-route-list\"></ul>" +
@@ -898,6 +1064,7 @@
       "<p id=\"remove-administrator-result\" role=\"status\"></p>" +
       "</form></section>";
     setupInterfaces();
+    setupLanServices();
     setupRoutes();
     setupApplyConfirmation();
     loadAdministrators();
