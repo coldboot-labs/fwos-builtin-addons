@@ -422,7 +422,7 @@
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
         "; current Accepted revision " + acceptedRevision + "." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -467,7 +467,7 @@
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Saving does not apply; review the new draft again before applying." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -525,7 +525,17 @@
         wan_pd: pendingDraft.wan_pd || "",
       };
     }
+    if ((pendingDraft.sections || []).indexOf("firewall") >= 0) {
+      payload.firewall = pendingDraft.firewall || [];
+    }
     return payload;
+  }
+
+  function policyDraftText(draft) {
+    if (!draft || !(draft.sections || []).some(function (section) { return section === "firewall"; })) {
+      return "";
+    }
+    return " Firewall policy: " + (draft.firewall || []).join("; ") + ".";
   }
 
   function serviceDraftText(draft) {
@@ -902,6 +912,141 @@
     });
   }
 
+  var acceptedPolicy = [];
+
+  function policyLine() {
+    var iface = val("policy-interface");
+    var source = val("policy-source");
+    var protocol = val("policy-protocol");
+    var port = val("policy-port");
+    var action = val("policy-action");
+    var parts = [];
+    if (iface) parts.push("iifname \"" + iface + "\"");
+    if (source) parts.push("ip saddr " + source);
+    if (protocol === "icmp") parts.push("icmp type echo-request");
+    else if ((protocol === "tcp" || protocol === "udp") && port) parts.push(protocol + " dport " + port);
+    else if (protocol === "tcp" || protocol === "udp") parts.push(protocol);
+    parts.push(action || "drop");
+    return parts.join(" ");
+  }
+
+  function proposedPolicy() {
+    var line = policyLine();
+    var rules = acceptedPolicy.slice();
+    if (pendingDraft && pendingDraft.firewall) rules = pendingDraft.firewall.slice();
+    if (line && rules.indexOf(line) < 0) rules.push(line);
+    return rules;
+  }
+
+  async function loadPolicy() {
+    var status = document.getElementById("accepted-policy-status");
+    if (!status) return;
+    var response = await fetch("/api/firewall", { credentials: "same-origin" });
+    var result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "Firewall policy unavailable");
+    var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+    var draft = await draftResponse.json();
+    if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+    pendingDraft = draft.status === "pending" ? draft : null;
+    acceptedRevision = result.revision;
+    acceptedPolicy = result.rules || [];
+    var select = document.getElementById("policy-interface");
+    select.innerHTML = "<option value=\"\"></option>" + (result.interfaces || []).map(function (iface) {
+      return "<option value=\"" + esc(iface.name) + "\">" + esc(iface.name + " " + (iface.role || "")) + "</option>";
+    }).join("");
+    var shown = pendingDraft && pendingDraft.firewall ? pendingDraft.firewall : acceptedPolicy;
+    document.getElementById("policy-rules").innerHTML = shown.length
+      ? shown.map(function (rule) { return "<li>" + esc(rule) + "</li>"; }).join("")
+      : "<li>No extra firewall rules</li>";
+    status.textContent = "Accepted revision " + result.revision;
+    document.getElementById("policy-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
+    document.getElementById("policy-apply").disabled = !!pendingDraft || !!pendingApply;
+  }
+
+  function setupPolicy() {
+    var review = document.getElementById("policy-review-panel");
+    var proposed = null;
+    loadPolicy().catch(function (error) {
+      var result = document.getElementById("policy-result");
+      if (result) result.textContent = "Could not load firewall policy: " + error.message;
+    });
+    document.getElementById("policy-review").addEventListener("click", function () {
+      proposed = proposedPolicy();
+      document.getElementById("policy-summary").textContent =
+        "Firewall policy: " + proposed.join("; ") +
+        ". Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
+      review.hidden = false;
+      document.getElementById("policy-result").textContent = "";
+    });
+    document.getElementById("policy-save-draft").addEventListener("click", async function (event) {
+      if (!proposed) return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            firewall: proposed,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        review.hidden = true;
+        document.getElementById("policy-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadPolicy();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("policy-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function applyPolicy(path, button) {
+      var rules = path.indexOf("save-and-apply") >= 0 ? proposedPolicy() : proposed;
+      if (!rules) return;
+      button.disabled = true;
+      try {
+        var response = await fetch(path, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, rules: rules }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("policy-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "Firewall policy unavailable") + recoveryText(result);
+          return;
+        }
+        review.hidden = true;
+        proposed = null;
+        document.getElementById("policy-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        await loadPolicy();
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("policy-result").textContent =
+          "Apply outcome unavailable; reload firewall policy before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.getElementById("policy-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyPolicy("/api/firewall/apply", event.currentTarget);
+    });
+    document.getElementById("policy-save-and-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyPolicy("/api/firewall/save-and-apply", event.currentTarget);
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -1018,6 +1163,26 @@
       "<button id=\"service-save-draft\" type=\"button\">Save LAN service draft</button>" +
       "<button id=\"service-apply\" type=\"button\">Apply LAN services</button></div>" +
       "<p id=\"service-result\" role=\"status\"></p></section>" +
+      "<section><h3>Firewall policy</h3>" +
+      "<p id=\"accepted-policy-status\"></p>" +
+      "<ul id=\"policy-rules\"></ul>" +
+      "<form id=\"policy-form\">" +
+      "<label>Interface <select id=\"policy-interface\"></select></label>" +
+      "<label>Source <input id=\"policy-source\" placeholder=\"10.56.0.2\"></label>" +
+      "<label>Protocol <select id=\"policy-protocol\">" +
+      "<option value=\"any\">any</option><option value=\"icmp\">icmp</option>" +
+      "<option value=\"tcp\">tcp</option><option value=\"udp\">udp</option></select></label>" +
+      "<label>Port <input id=\"policy-port\" inputmode=\"numeric\"></label>" +
+      "<label>Action <select id=\"policy-action\"><option value=\"drop\">drop</option>" +
+      "<option value=\"reject\">reject</option><option value=\"accept\">accept</option></select></label>" +
+      "</form>" +
+      "<button id=\"policy-review\" type=\"button\">Review firewall policy</button>" +
+      "<button id=\"policy-save-and-apply\" type=\"button\">Save and apply firewall policy</button>" +
+      "<div id=\"policy-review-panel\" hidden><h4>Review firewall policy</h4>" +
+      "<p id=\"policy-summary\"></p>" +
+      "<button id=\"policy-save-draft\" type=\"button\">Save firewall draft</button>" +
+      "<button id=\"policy-apply\" type=\"button\">Apply firewall policy</button></div>" +
+      "<p id=\"policy-result\" role=\"status\"></p></section>" +
       "<section><h3>Static routes</h3>" +
       "<p id=\"accepted-route-status\"></p>" +
       "<ul id=\"accepted-route-list\"></ul>" +
@@ -1065,6 +1230,7 @@
       "</form></section>";
     setupInterfaces();
     setupLanServices();
+    setupPolicy();
     setupRoutes();
     setupApplyConfirmation();
     loadAdministrators();
