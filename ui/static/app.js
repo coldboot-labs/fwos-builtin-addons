@@ -422,7 +422,7 @@
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
         "; current Accepted revision " + acceptedRevision + "." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -467,7 +467,7 @@
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Saving does not apply; review the new draft again before applying." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -538,7 +538,19 @@
         };
       });
     }
+    if ((pendingDraft.sections || []).indexOf("qdiscs") >= 0) {
+      payload.qdiscs = pendingDraft.qdiscs || [];
+    }
     return payload;
+  }
+
+  function qdiscDraftText(draft) {
+    if (!draft || !(draft.sections || []).some(function (section) { return section === "qdiscs"; })) {
+      return "";
+    }
+    return " Qdiscs: " + (draft.qdiscs || []).map(function (qdisc) {
+      return qdisc.kind + " on " + qdisc.dev;
+    }).join("; ") + ".";
   }
 
   function wireGuardDraftText(draft) {
@@ -1223,6 +1235,132 @@
     });
   }
 
+  var acceptedQdiscs = [];
+
+  function proposedQdiscs() {
+    var update = { dev: val("qdisc-dev"), kind: val("qdisc-kind") };
+    var qdiscs = (pendingDraft && pendingDraft.qdiscs ? pendingDraft.qdiscs : acceptedQdiscs).slice();
+    var replaced = false;
+    qdiscs = qdiscs.map(function (qdisc) {
+      if (qdisc.dev === update.dev) {
+        replaced = true;
+        return update;
+      }
+      return qdisc;
+    });
+    if (!replaced && update.dev) qdiscs.push(update);
+    return qdiscs;
+  }
+
+  async function loadQdiscs() {
+    var status = document.getElementById("accepted-qdisc-status");
+    if (!status) return;
+    var response = await fetch("/api/qdiscs", { credentials: "same-origin" });
+    var result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "Qdiscs unavailable");
+    var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+    var draft = await draftResponse.json();
+    if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+    pendingDraft = draft.status === "pending" ? draft : null;
+    acceptedRevision = result.revision;
+    acceptedQdiscs = result.qdiscs || [];
+    var select = document.getElementById("qdisc-dev");
+    select.innerHTML = (result.interfaces || []).map(function (name) {
+      return "<option value=\"" + esc(name) + "\">" + esc(name) + "</option>";
+    }).join("");
+    var shown = pendingDraft && pendingDraft.qdiscs ? pendingDraft.qdiscs : acceptedQdiscs;
+    document.getElementById("qdisc-list").innerHTML = shown.length
+      ? shown.map(function (qdisc) { return "<li>" + esc(qdisc.kind) + " on " + esc(qdisc.dev) + "</li>"; }).join("")
+      : "<li>No qdisc selected</li>";
+    status.textContent = "Accepted revision " + result.revision;
+    document.getElementById("qdisc-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
+    document.getElementById("qdisc-apply").disabled = !!pendingDraft || !!pendingApply;
+  }
+
+  function setupQdiscs() {
+    var review = document.getElementById("qdisc-review-panel");
+    var proposed = null;
+    loadQdiscs().catch(function (error) {
+      var result = document.getElementById("qdisc-result");
+      if (result) result.textContent = "Could not load traffic shaping: " + error.message;
+    });
+    document.getElementById("qdisc-review").addEventListener("click", function () {
+      proposed = proposedQdiscs();
+      document.getElementById("qdisc-summary").textContent =
+        "Qdiscs: " + proposed.map(function (qdisc) { return qdisc.kind + " on " + qdisc.dev; }).join("; ") +
+        ". Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
+      review.hidden = false;
+      document.getElementById("qdisc-result").textContent = "";
+    });
+    document.getElementById("qdisc-save-draft").addEventListener("click", async function (event) {
+      if (!proposed) return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            qdiscs: proposed,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        review.hidden = true;
+        document.getElementById("qdisc-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadQdiscs();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("qdisc-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function applyQdiscs(path, button) {
+      var qdiscs = path.indexOf("save-and-apply") >= 0 ? proposedQdiscs() : proposed;
+      if (!qdiscs) return;
+      button.disabled = true;
+      try {
+        var response = await fetch(path, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, qdiscs: qdiscs }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("qdisc-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "Qdisc change unavailable") + recoveryText(result);
+          return;
+        }
+        review.hidden = true;
+        proposed = null;
+        document.getElementById("qdisc-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        await loadQdiscs();
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("qdisc-result").textContent =
+          "Apply outcome unavailable; reload traffic shaping before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.getElementById("qdisc-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyQdiscs("/api/qdiscs/apply", event.currentTarget);
+    });
+    document.getElementById("qdisc-save-and-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyQdiscs("/api/qdiscs/save-and-apply", event.currentTarget);
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -1377,6 +1515,23 @@
       "<button id=\"wireguard-save-draft\" type=\"button\">Save WireGuard draft</button>" +
       "<button id=\"wireguard-apply\" type=\"button\">Apply WireGuard</button></div>" +
       "<p id=\"wireguard-result\" role=\"status\"></p></section>" +
+      "<section><h3>Traffic shaping</h3>" +
+      "<p id=\"accepted-qdisc-status\"></p>" +
+      "<ul id=\"qdisc-list\"></ul>" +
+      "<form id=\"qdisc-form\">" +
+      "<label>Interface <select id=\"qdisc-dev\"></select></label>" +
+      "<label>Qdisc <select id=\"qdisc-kind\">" +
+      "<option value=\"fq_codel\">fq_codel</option><option value=\"fq\">fq</option>" +
+      "<option value=\"pfifo\">pfifo</option><option value=\"bfifo\">bfifo</option>" +
+      "<option value=\"sfq\">sfq</option><option value=\"cake\">cake</option></select></label>" +
+      "</form>" +
+      "<button id=\"qdisc-review\" type=\"button\">Review traffic shaping</button>" +
+      "<button id=\"qdisc-save-and-apply\" type=\"button\">Save and apply traffic shaping</button>" +
+      "<div id=\"qdisc-review-panel\" hidden><h4>Review traffic shaping</h4>" +
+      "<p id=\"qdisc-summary\"></p>" +
+      "<button id=\"qdisc-save-draft\" type=\"button\">Save qdisc draft</button>" +
+      "<button id=\"qdisc-apply\" type=\"button\">Apply traffic shaping</button></div>" +
+      "<p id=\"qdisc-result\" role=\"status\"></p></section>" +
       "<section><h3>Static routes</h3>" +
       "<p id=\"accepted-route-status\"></p>" +
       "<ul id=\"accepted-route-list\"></ul>" +
@@ -1426,6 +1581,7 @@
     setupLanServices();
     setupPolicy();
     setupWireGuard();
+    setupQdiscs();
     setupRoutes();
     setupApplyConfirmation();
     loadAdministrators();
