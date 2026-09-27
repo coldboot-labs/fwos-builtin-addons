@@ -422,7 +422,7 @@
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
         "; current Accepted revision " + acceptedRevision + "." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft) + ipv6DraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -467,7 +467,7 @@
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Saving does not apply; review the new draft again before applying." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft) + ipv6DraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -541,7 +541,17 @@
     if ((pendingDraft.sections || []).indexOf("qdiscs") >= 0) {
       payload.qdiscs = pendingDraft.qdiscs || [];
     }
+    if ((pendingDraft.sections || []).indexOf("ipv6") >= 0) {
+      payload.ipv6 = { wans: pendingDraft.ipv6 || [] };
+    }
     return payload;
+  }
+
+  function ipv6DraftText(draft) {
+    if (!draft || !(draft.sections || []).some(function (section) { return section === "ipv6"; })) {
+      return "";
+    }
+    return " " + ipv6Summary(draft.ipv6 || []).replace(/ Review against Accepted revision .*$/, ".");
   }
 
   function qdiscDraftText(draft) {
@@ -1401,6 +1411,157 @@
     });
   }
 
+  var ipv6ModeLabels = { "static": "Static or none", slaac: "SLAAC from Router Advertisements", dhcpv6: "DHCPv6 address" };
+
+  function collectIpv6() {
+    var wans = [];
+    document.querySelectorAll("#ipv6-wans [data-ipv6-wan]").forEach(function (row) {
+      wans.push({
+        name: row.getAttribute("data-ipv6-wan"),
+        ipv6: row.querySelector("[data-field=mode]").value,
+        request_pd: row.querySelector("[data-field=pd]").checked,
+      });
+    });
+    return wans;
+  }
+
+  function ipv6Summary(wans) {
+    return "WAN IPv6: " + wans.map(function (wan) {
+      return wan.name + " " + (ipv6ModeLabels[wan.ipv6] || wan.ipv6) +
+        (wan.request_pd ? ", requests prefix delegation" : ", no prefix delegation");
+    }).join("; ") + ". LAN IPv6 is routed, never translated (no NAT66, NPTv6, or NAT64)." +
+      " Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
+  }
+
+  function ipv6LiveText(live) {
+    if (!live || !live.ok) return "Live IPv6 state unavailable" + (live && live.error ? ": " + live.error : "");
+    var lines = (live.wans || []).map(function (wan) {
+      return wan.name + ": " + (wan.addresses.length ? wan.addresses.join(" ") : "no global IPv6 address") +
+        (wan.default_route ? "; IPv6 default route" : "; no IPv6 default route") +
+        (wan.request_pd ? "; delegated prefix " + (wan.delegated_prefix || "none received") : "");
+    });
+    var prefixes = (live.lan_prefixes || []).map(function (entry) { return entry.prefix + " on " + entry.dev; });
+    lines.push("LAN prefix (" + live.lan_source + "): " + (prefixes.length ? prefixes.join(", ") + ", advertised by RA" : "none"));
+    lines.push(live.note);
+    return lines.join("\n");
+  }
+
+  async function loadIpv6() {
+    var status = document.getElementById("accepted-ipv6-status");
+    if (!status) return;
+    var response = await fetch("/api/ipv6", { credentials: "same-origin" });
+    var result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "IPv6 unavailable");
+    var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+    var draft = await draftResponse.json();
+    if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+    pendingDraft = draft.status === "pending" ? draft : null;
+    acceptedRevision = result.revision;
+    var shown = pendingDraft && pendingDraft.ipv6 ? pendingDraft.ipv6 : (result.wans || []);
+    document.getElementById("ipv6-wans").innerHTML = shown.length ? shown.map(function (wan, index) {
+      return "<fieldset data-ipv6-wan=\"" + esc(wan.name) + "\"><legend>" + esc(wan.name) + "</legend>" +
+        "<label for=\"ipv6-mode-" + index + "\">IPv6 on " + esc(wan.name) + "</label> " +
+        "<select id=\"ipv6-mode-" + index + "\" data-field=\"mode\">" +
+        ["static", "slaac", "dhcpv6"].map(function (mode) {
+          return "<option value=\"" + mode + "\"" + (wan.ipv6 === mode ? " selected" : "") + ">" + ipv6ModeLabels[mode] + "</option>";
+        }).join("") + "</select> " +
+        "<input type=\"checkbox\" id=\"ipv6-pd-" + index + "\" data-field=\"pd\"" + (wan.request_pd ? " checked" : "") + "> " +
+        "<label for=\"ipv6-pd-" + index + "\">Request prefix delegation on " + esc(wan.name) + "</label></fieldset>";
+    }).join("") : "<p>No WAN interface</p>";
+    document.getElementById("ipv6-live").textContent = ipv6LiveText(result.live);
+    status.textContent = "Accepted revision " + result.revision +
+      (result.wan_pd ? ". Static routed LAN prefix " + result.wan_pd + " is set in LAN services" : "");
+    document.getElementById("ipv6-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
+    document.getElementById("ipv6-apply").disabled = !!pendingDraft || !!pendingApply;
+  }
+
+  function setupIpv6() {
+    var review = document.getElementById("ipv6-review-panel");
+    var proposed = null;
+    loadIpv6().catch(function (error) {
+      var result = document.getElementById("ipv6-result");
+      if (result) result.textContent = "Could not load IPv6: " + error.message;
+    });
+    document.getElementById("ipv6-refresh").addEventListener("click", function () {
+      loadIpv6().catch(function (error) {
+        document.getElementById("ipv6-result").textContent = "Could not load IPv6: " + error.message;
+      });
+    });
+    document.getElementById("ipv6-review").addEventListener("click", function () {
+      proposed = collectIpv6();
+      document.getElementById("ipv6-summary").textContent = ipv6Summary(proposed);
+      review.hidden = false;
+      document.getElementById("ipv6-result").textContent = "";
+    });
+    document.getElementById("ipv6-save-draft").addEventListener("click", async function (event) {
+      if (!proposed) return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            ipv6: { wans: proposed },
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        review.hidden = true;
+        document.getElementById("ipv6-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadIpv6();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("ipv6-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function applyIpv6(path, button) {
+      var wans = path.indexOf("save-and-apply") >= 0 ? collectIpv6() : proposed;
+      if (!wans) return;
+      button.disabled = true;
+      try {
+        var response = await fetch(path, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, ipv6: { wans: wans } }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("ipv6-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "IPv6 change unavailable") + recoveryText(result);
+          return;
+        }
+        review.hidden = true;
+        proposed = null;
+        document.getElementById("ipv6-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        await loadIpv6();
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("ipv6-result").textContent =
+          "Apply outcome unavailable; reload IPv6 before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.getElementById("ipv6-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyIpv6("/api/ipv6/apply", event.currentTarget);
+    });
+    document.getElementById("ipv6-save-and-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyIpv6("/api/ipv6/save-and-apply", event.currentTarget);
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -1573,6 +1734,18 @@
       "<button id=\"qdisc-save-draft\" type=\"button\">Save qdisc draft</button>" +
       "<button id=\"qdisc-apply\" type=\"button\">Apply traffic shaping</button></div>" +
       "<p id=\"qdisc-result\" role=\"status\"></p></section>" +
+      "<section><h3>IPv6</h3>" +
+      "<p id=\"accepted-ipv6-status\"></p>" +
+      "<div id=\"ipv6-wans\"></div>" +
+      "<h4>Live IPv6</h4><pre id=\"ipv6-live\"></pre>" +
+      "<button id=\"ipv6-refresh\" type=\"button\">Refresh live IPv6</button>" +
+      "<button id=\"ipv6-review\" type=\"button\">Review IPv6</button>" +
+      "<button id=\"ipv6-save-and-apply\" type=\"button\">Save and apply IPv6</button>" +
+      "<div id=\"ipv6-review-panel\" hidden><h4>Review IPv6</h4>" +
+      "<p id=\"ipv6-summary\"></p>" +
+      "<button id=\"ipv6-save-draft\" type=\"button\">Save IPv6 draft</button>" +
+      "<button id=\"ipv6-apply\" type=\"button\">Apply IPv6</button></div>" +
+      "<p id=\"ipv6-result\" role=\"status\"></p></section>" +
       "<section><h3>Static routes</h3>" +
       "<p id=\"accepted-route-status\"></p>" +
       "<ul id=\"accepted-route-list\"></ul>" +
@@ -1623,6 +1796,7 @@
     setupPolicy();
     setupWireGuard();
     setupQdiscs();
+    setupIpv6();
     setupRoutes();
     setupApplyConfirmation();
     loadAdministrators();
