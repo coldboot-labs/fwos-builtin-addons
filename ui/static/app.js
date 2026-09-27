@@ -568,7 +568,7 @@
     if (!draft || !(draft.sections || []).some(function (section) { return section === "firewall"; })) {
       return "";
     }
-    return " Firewall policy: " + (draft.firewall || []).join("; ") + ".";
+    return " Firewall policy: " + ((draft.firewall || []).length ? draft.firewall.join("; ") : "no extra rules") + ".";
   }
 
   function serviceDraftText(draft) {
@@ -593,7 +593,7 @@
   }
 
   function roleOptions(selected) {
-    return ["wan", "lan", "mgmt", "unused"].map(function (role) {
+    return ["wan", "lan", "mgmt", "unused", "stick"].map(function (role) {
       return "<option value=\"" + role + "\"" + (role === selected ? " selected" : "") + ">" + role + "</option>";
     }).join("");
   }
@@ -946,6 +946,8 @@
   }
 
   var acceptedPolicy = [];
+  var loadedPolicy = [];
+  var workingPolicy = [];
 
   function policyLine() {
     var iface = val("policy-interface");
@@ -959,16 +961,42 @@
     if (protocol === "icmp") parts.push("icmp type echo-request");
     else if ((protocol === "tcp" || protocol === "udp") && port) parts.push(protocol + " dport " + port);
     else if (protocol === "tcp" || protocol === "udp") parts.push(protocol);
+    // A verdict alone would match all input, so a rule needs a match first.
+    if (!parts.length) return "";
     parts.push(action || "drop");
     return parts.join(" ");
   }
 
   function proposedPolicy() {
     var line = policyLine();
-    var rules = acceptedPolicy.slice();
-    if (pendingDraft && pendingDraft.firewall) rules = pendingDraft.firewall.slice();
+    var rules = workingPolicy.slice();
     if (line && rules.indexOf(line) < 0) rules.push(line);
     return rules;
+  }
+
+  function policyProblem(rules) {
+    if (rules.join("\n") === loadedPolicy.join("\n")) {
+      return "Choose an interface, source, or protocol for a new rule, or remove a rule";
+    }
+    return "";
+  }
+
+  function renderPolicyRules() {
+    var list = document.getElementById("policy-rules");
+    if (!workingPolicy.length) {
+      list.innerHTML = "<li>No extra firewall rules</li>";
+      return;
+    }
+    list.innerHTML = workingPolicy.map(function (rule, index) {
+      return "<li>" + esc(rule) + " <button type=\"button\" data-remove-rule=\"" + index +
+        "\" aria-label=\"Remove rule " + esc(rule) + "\">Remove</button></li>";
+    }).join("");
+    list.querySelectorAll("[data-remove-rule]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        workingPolicy.splice(Number(button.getAttribute("data-remove-rule")), 1);
+        renderPolicyRules();
+      });
+    });
   }
 
   async function loadPolicy() {
@@ -987,10 +1015,9 @@
     select.innerHTML = "<option value=\"\"></option>" + (result.interfaces || []).map(function (iface) {
       return "<option value=\"" + esc(iface.name) + "\">" + esc(iface.name + " " + (iface.role || "")) + "</option>";
     }).join("");
-    var shown = pendingDraft && pendingDraft.firewall ? pendingDraft.firewall : acceptedPolicy;
-    document.getElementById("policy-rules").innerHTML = shown.length
-      ? shown.map(function (rule) { return "<li>" + esc(rule) + "</li>"; }).join("")
-      : "<li>No extra firewall rules</li>";
+    loadedPolicy = (pendingDraft && pendingDraft.firewall ? pendingDraft.firewall : acceptedPolicy).slice();
+    workingPolicy = loadedPolicy.slice();
+    renderPolicyRules();
     status.textContent = "Accepted revision " + result.revision;
     document.getElementById("policy-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
     document.getElementById("policy-apply").disabled = !!pendingDraft || !!pendingApply;
@@ -1005,8 +1032,15 @@
     });
     document.getElementById("policy-review").addEventListener("click", function () {
       proposed = proposedPolicy();
+      var problem = policyProblem(proposed);
+      if (problem) {
+        proposed = null;
+        review.hidden = true;
+        document.getElementById("policy-result").textContent = "Rejected: " + problem;
+        return;
+      }
       document.getElementById("policy-summary").textContent =
-        "Firewall policy: " + proposed.join("; ") +
+        "Firewall policy: " + (proposed.length ? proposed.join("; ") : "no extra rules") +
         ". Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
       review.hidden = false;
       document.getElementById("policy-result").textContent = "";
@@ -1041,6 +1075,11 @@
     async function applyPolicy(path, button) {
       var rules = path.indexOf("save-and-apply") >= 0 ? proposedPolicy() : proposed;
       if (!rules) return;
+      var problem = policyProblem(rules);
+      if (problem) {
+        document.getElementById("policy-result").textContent = "Rejected: " + problem;
+        return;
+      }
       button.disabled = true;
       try {
         var response = await fetch(path, {
@@ -1272,6 +1311,7 @@
     document.getElementById("qdisc-list").innerHTML = shown.length
       ? shown.map(function (qdisc) { return "<li>" + esc(qdisc.kind) + " on " + esc(qdisc.dev) + "</li>"; }).join("")
       : "<li>No qdisc selected</li>";
+    document.getElementById("qdisc-live").textContent = result.effective || "Live qdisc state unavailable";
     status.textContent = "Accepted revision " + result.revision;
     document.getElementById("qdisc-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
     document.getElementById("qdisc-apply").disabled = !!pendingDraft || !!pendingApply;
@@ -1518,6 +1558,7 @@
       "<section><h3>Traffic shaping</h3>" +
       "<p id=\"accepted-qdisc-status\"></p>" +
       "<ul id=\"qdisc-list\"></ul>" +
+      "<h4>Live qdiscs</h4><pre id=\"qdisc-live\"></pre>" +
       "<form id=\"qdisc-form\">" +
       "<label>Interface <select id=\"qdisc-dev\"></select></label>" +
       "<label>Qdisc <select id=\"qdisc-kind\">" +
