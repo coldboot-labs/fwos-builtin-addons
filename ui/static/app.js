@@ -211,6 +211,7 @@
       document.getElementById("draft-actions").hidden = !pendingDraft;
       document.getElementById("draft-reconcile").hidden = !pendingDraft || !pendingDraft.stale;
       document.getElementById("route-apply").disabled = !!pendingDraft || !!pendingApply;
+      document.getElementById("import-desired").disabled = !!pendingDraft;
       updateRouteShortcutAvailability();
       var select = document.getElementById("route-interface");
       select.innerHTML = "<option value=\"\">Automatic</option>" +
@@ -422,7 +423,7 @@
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
         "; current Accepted revision " + acceptedRevision + "." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft) + ipv6DraftText(pendingDraft);
+        draftSectionsText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -461,13 +462,16 @@
       if (!pendingDraft || !pendingDraft.stale) return;
       draftReviewMode = "reconcile";
       document.getElementById("draft-review-heading").textContent = "Review reconciliation";
-      document.getElementById("draft-review-summary").textContent =
-        "Current Accepted revision " + acceptedRevision + " routes: " +
+      document.getElementById("draft-review-summary").textContent = (pendingDraft.sections || []).indexOf("import") >= 0
+        ? "Your imported network replaces current Accepted revision " + acceptedRevision +
+          " in full, discarding changes accepted after the import." +
+          " Saving does not apply; review the new draft again before applying." + draftSectionsText(pendingDraft)
+        : "Current Accepted revision " + acceptedRevision + " routes: " +
         acceptedRoutes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Saving does not apply; review the new draft again before applying." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft) + qdiscDraftText(pendingDraft) + ipv6DraftText(pendingDraft);
+        draftSectionsText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -496,8 +500,27 @@
     });
   }
 
+  // An imported draft proposes the whole network, so it shows every section.
+  function draftHas(draft, section) {
+    var sections = (draft && draft.sections) || [];
+    return sections.indexOf(section) >= 0 || sections.indexOf("import") >= 0;
+  }
+
+  function draftSectionsText(draft) {
+    return importDraftText(draft) + interfaceDraftText(draft) + serviceDraftText(draft) +
+      policyDraftText(draft) + wireGuardDraftText(draft) + qdiscDraftText(draft) + ipv6DraftText(draft);
+  }
+
+  function importDraftText(draft) {
+    if (!draft || !draftHas(draft, "import")) return "";
+    return " Imported network Desired state: applying replaces the whole Accepted network," +
+      " including changes accepted after the import;" +
+      " Identity configuration is unchanged. Hostname: " + (draft.hostname || "unset") +
+      ". Apply confirmation: " + (draft.apply_confirmation ? "required" : "off") + ".";
+  }
+
   function interfaceDraftText(draft) {
-    if (!draft || !(draft.sections || []).some(function (section) { return section === "interfaces"; })) {
+    if (!draftHas(draft, "interfaces")) {
       return "";
     }
     return " Interfaces: " + (draft.interfaces || []).map(function (iface) {
@@ -548,14 +571,14 @@
   }
 
   function ipv6DraftText(draft) {
-    if (!draft || !(draft.sections || []).some(function (section) { return section === "ipv6"; })) {
+    if (!draftHas(draft, "ipv6")) {
       return "";
     }
     return " " + ipv6Summary(draft.ipv6 || []).replace(/ Review against Accepted revision .*$/, ".");
   }
 
   function qdiscDraftText(draft) {
-    if (!draft || !(draft.sections || []).some(function (section) { return section === "qdiscs"; })) {
+    if (!draftHas(draft, "qdiscs")) {
       return "";
     }
     return " Qdiscs: " + (draft.qdiscs || []).map(function (qdisc) {
@@ -564,7 +587,7 @@
   }
 
   function wireGuardDraftText(draft) {
-    if (!draft || !(draft.sections || []).some(function (section) { return section === "wireguard"; })) {
+    if (!draftHas(draft, "wireguard")) {
       return "";
     }
     return " WireGuard: " + (draft.wireguard || []).map(function (tunnel) {
@@ -575,14 +598,14 @@
   }
 
   function policyDraftText(draft) {
-    if (!draft || !(draft.sections || []).some(function (section) { return section === "firewall"; })) {
+    if (!draftHas(draft, "firewall")) {
       return "";
     }
     return " Firewall policy: " + ((draft.firewall || []).length ? draft.firewall.join("; ") : "no extra rules") + ".";
   }
 
   function serviceDraftText(draft) {
-    if (!draft || !(draft.sections || []).some(function (section) { return section === "services"; })) {
+    if (!draftHas(draft, "services")) {
       return "";
     }
     return " " + serviceSummary({
@@ -1562,6 +1585,73 @@
     });
   }
 
+  function setupTransfer() {
+    var acknowledge = document.getElementById("export-acknowledge");
+    var exportButton = document.getElementById("export-desired");
+    var result = document.getElementById("transfer-result");
+    acknowledge.addEventListener("change", function () {
+      exportButton.disabled = !acknowledge.checked;
+    });
+    exportButton.addEventListener("click", async function () {
+      if (!acknowledge.checked) return;
+      exportButton.disabled = true;
+      try {
+        var response = await fetch("/api/desired-state/export", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ acknowledge_sensitive: true }),
+        });
+        var exported = await response.json();
+        if (!response.ok || !exported.ok) throw new Error(exported.error || "export unavailable");
+        var url = URL.createObjectURL(new Blob([exported.content], { type: "text/plain" }));
+        var link = document.createElement("a");
+        link.href = url;
+        link.download = exported.filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        result.textContent = "Exported Accepted revision " + exported.revision +
+          ". The file contains network secrets; store it securely.";
+      } catch (error) {
+        result.textContent = "Export failed: " + error.message;
+      } finally {
+        acknowledge.checked = false;
+        exportButton.disabled = true;
+      }
+    });
+    document.getElementById("import-form").addEventListener("submit", async function (event) {
+      event.preventDefault();
+      var input = document.getElementById("import-file");
+      var button = document.getElementById("import-desired");
+      if (pendingDraft || !input.files.length) return;
+      button.disabled = true;
+      try {
+        var content = await input.files[0].text();
+        var response = await fetch("/api/desired-state/import", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, content: content }),
+        });
+        var imported = await response.json();
+        if (!response.ok || !imported.ok) {
+          result.textContent = (imported.outcome === "rejected" ? "Import rejected: " : "Import failed: ") +
+            (imported.error || "import unavailable") + ". Accepted network unchanged.";
+          return;
+        }
+        input.value = "";
+        result.textContent = "Imported into your private draft against Accepted revision " +
+          imported.base_revision + "; networking unchanged. Review the pending draft before applying.";
+        await Promise.all([loadInterfaces(), loadLanServices(), loadPolicy(), loadWireGuard(),
+          loadQdiscs(), loadIpv6()].map(function (loading) { return loading.catch(function () {}); }));
+      } catch (_) {
+        result.textContent = "Import outcome unavailable; reload before retrying.";
+      } finally {
+        await loadRoutes();
+      }
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -1772,6 +1862,15 @@
       "<button id=\"route-remove-save-and-apply\" type=\"button\" hidden>Save and apply</button>" +
       "<button id=\"route-cancel-review\" type=\"button\">Cancel review</button></div>" +
       "<p id=\"route-result\" role=\"status\"></p></section>" +
+      "<section><h3>Network Desired state transfer</h3>" +
+      "<p id=\"transfer-warning\" class=\"err\">The export is a plaintext file containing network secrets," +
+      " such as WireGuard private keys. Store it like a password. It contains no administrator accounts.</p>" +
+      "<label><input id=\"export-acknowledge\" type=\"checkbox\">I understand this file contains network secrets</label>" +
+      "<button id=\"export-desired\" type=\"button\" disabled>Export network Desired state</button>" +
+      "<form id=\"import-form\">" +
+      "<label>Network export file <input id=\"import-file\" type=\"file\" accept=\".toml,text/plain\" required></label>" +
+      "<button id=\"import-desired\" type=\"submit\">Import into private draft</button></form>" +
+      "<p id=\"transfer-result\" role=\"status\"></p></section>" +
       "<section><h3>Administrators</h3>" +
       "<ul id=\"administrator-list\"></ul>" +
       "<form id=\"create-administrator\">" +
@@ -1798,6 +1897,7 @@
     setupQdiscs();
     setupIpv6();
     setupRoutes();
+    setupTransfer();
     setupApplyConfirmation();
     loadAdministrators();
     document.getElementById("create-administrator").addEventListener("submit", async function (ev) {
