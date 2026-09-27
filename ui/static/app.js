@@ -1691,6 +1691,91 @@
     });
   }
 
+  var hostUpdatePoll = null;
+  var hostUpdateStaged = "";
+
+  async function loadHostUpdate() {
+    var status = document.getElementById("host-update-status");
+    if (!status) return;
+    clearTimeout(hostUpdatePoll);
+    try {
+      var response = await fetch("/api/host-update", { credentials: "same-origin" });
+      if (response.status === 401) {
+        renderLogin();
+        return;
+      }
+      var result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Host update status unavailable");
+      hostUpdateStaged = result.staged || "";
+      status.textContent = "Active Release: " + (result.booted || "unknown") + ". " +
+        (hostUpdateStaged
+          ? "Staged Release: " + hostUpdateStaged + ". Reboot required to activate it."
+          : "No Release is staged.");
+      var op = result.operation || {};
+      var staging = op.state === "staging";
+      document.getElementById("host-update-operation").textContent = staging
+        ? "Staging " + op.image + "; forwarding continues."
+        : op.state === "failed"
+          ? "Staging " + op.image + " failed: " + op.error + ". The active Release and network are unchanged."
+          : "";
+      document.getElementById("host-update-stage").disabled = staging;
+      document.getElementById("host-reboot").disabled = staging;
+      if (staging) hostUpdatePoll = setTimeout(loadHostUpdate, 3000);
+    } catch (error) {
+      status.textContent = "Could not load Host update status: " + error.message;
+      hostUpdatePoll = setTimeout(loadHostUpdate, 10000);
+    }
+  }
+
+  function setupHostUpdate() {
+    var result = document.getElementById("host-update-result");
+    document.getElementById("host-update-form").addEventListener("submit", async function (event) {
+      event.preventDefault();
+      var button = document.getElementById("host-update-stage");
+      var image = val("host-update-image");
+      button.disabled = true;
+      result.textContent = "";
+      try {
+        var response = await fetch("/api/host-update/stage", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: image }),
+        });
+        var staged = await response.json();
+        result.textContent = response.ok && staged.ok
+          ? "Staging " + image + " started. Nothing changes until you reboot."
+          : "Staging refused: " + (staged.error || "Host update unavailable") + ".";
+      } catch (_) {
+        result.textContent = "Staging request outcome unavailable; check Host update status.";
+      } finally {
+        await loadHostUpdate();
+      }
+    });
+    document.getElementById("host-reboot").addEventListener("click", async function (event) {
+      var button = event.currentTarget;
+      var question = "Reboot the appliance now? Forwarding stops until it restarts." +
+        (hostUpdateStaged ? " The staged Release " + hostUpdateStaged + " becomes active." : "");
+      if (!window.confirm(question)) return;
+      button.disabled = true;
+      result.textContent = "";
+      try {
+        var response = await fetch("/api/host-update/reboot", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        var reboot = await response.json();
+        if (!response.ok || !reboot.ok) throw new Error(reboot.error || "reboot unavailable");
+        clearTimeout(hostUpdatePoll);
+        result.textContent = "Rebooting. Sign in again once the appliance is back.";
+      } catch (error) {
+        result.textContent = "Reboot refused: " + error.message + ".";
+        button.disabled = false;
+      }
+    });
+    loadHostUpdate();
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -1761,6 +1846,15 @@
       "<p>WAN PD: " + esc(st.wan_pd || "") + "</p>" +
       "<p>UI exposure: " + esc(exposure) + "</p>" +
       "<p class=\"muted\">Default policy is applied automatically when a WAN exists.</p>" +
+      "<section><h3>Host update</h3>" +
+      "<p id=\"host-update-status\"></p>" +
+      "<p id=\"host-update-operation\" role=\"status\"></p>" +
+      "<form id=\"host-update-form\">" +
+      "<label>Release image <input id=\"host-update-image\" required placeholder=\"registry.example/fwos:stable\"></label>" +
+      "<button id=\"host-update-stage\" type=\"submit\">Stage update</button></form>" +
+      "<p class=\"muted\">Staging downloads the Release while forwarding continues; it becomes active only when you reboot.</p>" +
+      "<button id=\"host-reboot\" type=\"button\">Reboot appliance</button>" +
+      "<p id=\"host-update-result\" role=\"status\"></p></section>" +
       "<section><h3>Apply confirmation</h3>" +
       "<p id=\"apply-confirmation-status\"></p>" +
       "<form id=\"apply-confirmation-form\">" +
@@ -1942,6 +2036,7 @@
     setupRoutes();
     setupTransfer();
     setupApplyConfirmation();
+    setupHostUpdate();
     loadAdministrators();
     document.getElementById("create-administrator").addEventListener("submit", async function (ev) {
       ev.preventDefault();
