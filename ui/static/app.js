@@ -1711,6 +1711,13 @@
         (hostUpdateStaged
           ? "Staged Release: " + hostUpdateStaged + ". Reboot required to activate it."
           : "No Release is staged.");
+      var last = result.last_update || {};
+      document.getElementById("host-update-health").textContent = last.outcome === "rolled_back"
+        ? "Release " + last.release + " failed appliance health (" + last.reason +
+          "); the appliance automatically returned to the previous Release and its network."
+        : last.outcome === "accepted"
+          ? "Release " + last.release + " passed appliance health after its update reboot."
+          : "";
       var op = result.operation || {};
       var staging = op.state === "staging";
       document.getElementById("host-update-operation").textContent = staging
@@ -1848,6 +1855,7 @@
       "<p class=\"muted\">Default policy is applied automatically when a WAN exists.</p>" +
       "<section><h3>Host update</h3>" +
       "<p id=\"host-update-status\"></p>" +
+      "<p id=\"host-update-health\" role=\"status\"></p>" +
       "<p id=\"host-update-operation\" role=\"status\"></p>" +
       "<form id=\"host-update-form\">" +
       "<label>Release image <input id=\"host-update-image\" required placeholder=\"registry.example/fwos:stable\"></label>" +
