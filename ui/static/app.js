@@ -422,7 +422,7 @@
           return route.to + " via " + route.via;
         }).join(", ") + ". Based on Accepted revision " + pendingDraft.base_revision +
         "; current Accepted revision " + acceptedRevision + "." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = false;
       document.getElementById("draft-reconcile-save").hidden = true;
       document.getElementById("draft-review-panel").hidden = false;
@@ -467,7 +467,7 @@
         ". Replace those routes with your private pending routes: " +
         pendingDraft.routes.map(function (route) { return route.to + " via " + route.via; }).join(", ") +
         ". Saving does not apply; review the new draft again before applying." +
-        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft);
+        interfaceDraftText(pendingDraft) + serviceDraftText(pendingDraft) + policyDraftText(pendingDraft) + wireGuardDraftText(pendingDraft);
       document.getElementById("draft-apply").hidden = true;
       document.getElementById("draft-reconcile-save").hidden = false;
       document.getElementById("draft-review-panel").hidden = false;
@@ -528,7 +528,28 @@
     if ((pendingDraft.sections || []).indexOf("firewall") >= 0) {
       payload.firewall = pendingDraft.firewall || [];
     }
+    if ((pendingDraft.sections || []).indexOf("wireguard") >= 0) {
+      payload.wireguard = (pendingDraft.wireguard || []).map(function (tunnel) {
+        return {
+          name: tunnel.name,
+          listen_port: tunnel.listen_port,
+          addresses: tunnel.addresses || [],
+          private_key: "",
+        };
+      });
+    }
     return payload;
+  }
+
+  function wireGuardDraftText(draft) {
+    if (!draft || !(draft.sections || []).some(function (section) { return section === "wireguard"; })) {
+      return "";
+    }
+    return " WireGuard: " + (draft.wireguard || []).map(function (tunnel) {
+      return tunnel.name + " port " + (tunnel.listen_port || "auto") +
+        " " + (tunnel.addresses || []).join(" ") +
+        (tunnel.private_key_set ? " private key set" : " private key missing");
+    }).join("; ") + ".";
   }
 
   function policyDraftText(draft) {
@@ -1047,6 +1068,161 @@
     });
   }
 
+  function wireGuardTunnel() {
+    var port = val("wireguard-port");
+    var tunnel = {
+      name: val("wireguard-name"),
+      private_key: document.getElementById("wireguard-key").value,
+      addresses: val("wireguard-addresses").split(/[\s,]+/).filter(Boolean),
+      route_to: val("wireguard-route-to"),
+      route_via: val("wireguard-route-via"),
+    };
+    if (port) tunnel.listen_port = Number(port);
+    return tunnel;
+  }
+
+  function wireGuardProblem(tunnel) {
+    var port = val("wireguard-port");
+    if (port && !/^[1-9]\d{0,4}$/.test(port)) return "WireGuard needs a usable listen port";
+    if (Number(port) > 65535) return "WireGuard needs a usable listen port";
+    if ((tunnel.route_to && !tunnel.route_via) || (!tunnel.route_to && tunnel.route_via)) {
+      return "WireGuard route needs both a destination and a next hop";
+    }
+    return "";
+  }
+
+  function wireGuardSummary(tunnel) {
+    return "WireGuard " + tunnel.name +
+      " port " + (tunnel.listen_port || "auto") +
+      " " + (tunnel.addresses || []).join(" ") +
+      (tunnel.private_key ? " private key entered" : " private key unchanged") +
+      (tunnel.route_to ? " route " + tunnel.route_to + " via " + tunnel.route_via : "") +
+      ". Review against Accepted revision " + (pendingDraft ? pendingDraft.base_revision : acceptedRevision);
+  }
+
+  async function loadWireGuard() {
+    var status = document.getElementById("accepted-wireguard-status");
+    if (!status) return;
+    var response = await fetch("/api/wireguard", { credentials: "same-origin" });
+    var result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "WireGuard unavailable");
+    var draftResponse = await fetch("/api/draft", { credentials: "same-origin" });
+    var draft = await draftResponse.json();
+    if (!draftResponse.ok || !draft.ok) throw new Error(draft.error || "Draft unavailable");
+    pendingDraft = draft.status === "pending" ? draft : null;
+    acceptedRevision = result.revision;
+    var shown = pendingDraft && pendingDraft.wireguard ? pendingDraft.wireguard : result.wireguard;
+    document.getElementById("wireguard-list").innerHTML = (shown || []).length
+      ? shown.map(function (tunnel) {
+        return "<li>" + esc(tunnel.name) + " port " + esc(tunnel.listen_port || "auto") +
+          " " + esc((tunnel.addresses || []).join(" ")) +
+          (tunnel.private_key_set ? " private key set" : " private key missing") + "</li>";
+      }).join("")
+      : "<li>No WireGuard tunnels</li>";
+    document.getElementById("wireguard-key").value = "";
+    status.textContent = "Accepted revision " + result.revision;
+    document.getElementById("wireguard-save-and-apply").disabled = !!pendingDraft || !!pendingApply;
+    document.getElementById("wireguard-apply").disabled = !!pendingDraft || !!pendingApply;
+  }
+
+  function setupWireGuard() {
+    var review = document.getElementById("wireguard-review-panel");
+    var proposed = null;
+    loadWireGuard().catch(function (error) {
+      var result = document.getElementById("wireguard-result");
+      if (result) result.textContent = "Could not load WireGuard: " + error.message;
+    });
+    document.getElementById("wireguard-review").addEventListener("click", function () {
+      var tunnel = wireGuardTunnel();
+      var problem = wireGuardProblem(tunnel);
+      if (problem) {
+        proposed = null;
+        review.hidden = true;
+        document.getElementById("wireguard-result").textContent = "Rejected: " + problem;
+        return;
+      }
+      proposed = [tunnel];
+      document.getElementById("wireguard-summary").textContent = wireGuardSummary(proposed[0]);
+      review.hidden = false;
+      document.getElementById("wireguard-result").textContent = "";
+    });
+    document.getElementById("wireguard-save-draft").addEventListener("click", async function (event) {
+      if (!proposed) return;
+      var button = event.currentTarget;
+      button.disabled = true;
+      try {
+        var response = await fetch("/api/draft/save", {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base_revision: pendingDraft ? pendingDraft.base_revision : acceptedRevision,
+            version: pendingDraft ? pendingDraft.version : null,
+            wireguard: proposed,
+          }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "Draft save failed");
+        review.hidden = true;
+        document.getElementById("wireguard-key").value = "";
+        document.getElementById("wireguard-result").textContent =
+          "Draft saved against Accepted revision " + result.base_revision + "; networking unchanged";
+        await loadWireGuard();
+        await loadRoutes();
+      } catch (error) {
+        document.getElementById("wireguard-result").textContent = "Draft save failed: " + error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    async function applyTunnel(path, button) {
+      var tunnel = path.indexOf("save-and-apply") >= 0 ? wireGuardTunnel() : null;
+      var problem = tunnel ? wireGuardProblem(tunnel) : "";
+      if (problem) {
+        document.getElementById("wireguard-result").textContent = "Rejected: " + problem;
+        return;
+      }
+      var tunnels = tunnel ? [tunnel] : proposed;
+      if (!tunnels) return;
+      button.disabled = true;
+      try {
+        var response = await fetch(path, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_revision: acceptedRevision, wireguard: tunnels }),
+        });
+        var result = await response.json();
+        if (!response.ok || !result.ok) {
+          document.getElementById("wireguard-result").textContent =
+            (result.outcome === "rejected" ? "Rejected: " : "Apply failed: ") +
+            (result.error || "WireGuard change unavailable") + recoveryText(result);
+          return;
+        }
+        review.hidden = true;
+        proposed = null;
+        document.getElementById("wireguard-key").value = "";
+        document.getElementById("wireguard-result").textContent = result.outcome === "pending_confirmation"
+          ? "Revision " + result.revision + " is pending confirmation."
+          : "Accepted revision " + result.revision;
+        await loadWireGuard();
+        await loadRoutes();
+        await loadApplyConfirmation();
+      } catch (_) {
+        document.getElementById("wireguard-result").textContent =
+          "Apply outcome unavailable; reload WireGuard before retrying.";
+      } finally {
+        button.disabled = false;
+      }
+    }
+    document.getElementById("wireguard-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyTunnel("/api/wireguard/apply", event.currentTarget);
+    });
+    document.getElementById("wireguard-save-and-apply").addEventListener("click", function (event) {
+      if (pendingDraft || pendingApply) return;
+      applyTunnel("/api/wireguard/save-and-apply", event.currentTarget);
+    });
+  }
+
   function renderLogin() {
     app.innerHTML =
       "<h2>Sign in</h2>" +
@@ -1183,6 +1359,24 @@
       "<button id=\"policy-save-draft\" type=\"button\">Save firewall draft</button>" +
       "<button id=\"policy-apply\" type=\"button\">Apply firewall policy</button></div>" +
       "<p id=\"policy-result\" role=\"status\"></p></section>" +
+      "<section><h3>WireGuard</h3>" +
+      "<p id=\"accepted-wireguard-status\"></p>" +
+      "<ul id=\"wireguard-list\"></ul>" +
+      "<form id=\"wireguard-form\">" +
+      "<label>Name <input id=\"wireguard-name\" value=\"wg0\"></label>" +
+      "<label>Private key <input id=\"wireguard-key\" type=\"password\" autocomplete=\"off\"></label>" +
+      "<label>Listen port <input id=\"wireguard-port\" inputmode=\"numeric\" placeholder=\"51820\"></label>" +
+      "<label>Addresses <input id=\"wireguard-addresses\" placeholder=\"10.13.13.1/24\"></label>" +
+      "<label>Route destination <input id=\"wireguard-route-to\" placeholder=\"198.51.100.0/24\"></label>" +
+      "<label>Route next hop <input id=\"wireguard-route-via\" placeholder=\"10.13.13.2\"></label>" +
+      "</form>" +
+      "<button id=\"wireguard-review\" type=\"button\">Review WireGuard</button>" +
+      "<button id=\"wireguard-save-and-apply\" type=\"button\">Save and apply WireGuard</button>" +
+      "<div id=\"wireguard-review-panel\" hidden><h4>Review WireGuard</h4>" +
+      "<p id=\"wireguard-summary\"></p>" +
+      "<button id=\"wireguard-save-draft\" type=\"button\">Save WireGuard draft</button>" +
+      "<button id=\"wireguard-apply\" type=\"button\">Apply WireGuard</button></div>" +
+      "<p id=\"wireguard-result\" role=\"status\"></p></section>" +
       "<section><h3>Static routes</h3>" +
       "<p id=\"accepted-route-status\"></p>" +
       "<ul id=\"accepted-route-list\"></ul>" +
@@ -1231,6 +1425,7 @@
     setupInterfaces();
     setupLanServices();
     setupPolicy();
+    setupWireGuard();
     setupRoutes();
     setupApplyConfirmation();
     loadAdministrators();
