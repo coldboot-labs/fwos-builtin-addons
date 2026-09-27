@@ -1585,6 +1585,22 @@
     });
   }
 
+  // A binary age file (for example from `age -p`) is sent in age's standard
+  // armor so it survives the JSON request; other files are sent as text.
+  async function importFileText(file) {
+    var bytes = new Uint8Array(await file.arrayBuffer());
+    var header = "age-encryption.org/";
+    if (String.fromCharCode.apply(null, bytes.subarray(0, header.length)) !== header) {
+      return new TextDecoder().decode(bytes);
+    }
+    var binary = "";
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return "-----BEGIN AGE ENCRYPTED FILE-----\n" + btoa(binary).replace(/.{64}/g, "$&\n").replace(/\n$/, "") +
+      "\n-----END AGE ENCRYPTED FILE-----\n";
+  }
+
   function setupTransfer() {
     var acknowledge = document.getElementById("export-acknowledge");
     var exportButton = document.getElementById("export-desired");
@@ -1592,14 +1608,27 @@
     acknowledge.addEventListener("change", function () {
       exportButton.disabled = !acknowledge.checked;
     });
+    var exportPassphrase = document.getElementById("export-passphrase");
+    var exportConfirm = document.getElementById("export-passphrase-confirm");
     exportButton.addEventListener("click", async function () {
       if (!acknowledge.checked) return;
+      // Passphrases stay in these fields only for this one request.
+      var passphrase = exportPassphrase.value;
+      var confirmed = exportConfirm.value;
+      exportPassphrase.value = "";
+      exportConfirm.value = "";
+      if (passphrase !== confirmed) {
+        result.textContent = "Export failed: passphrases do not match; nothing was exported.";
+        return;
+      }
       exportButton.disabled = true;
       try {
+        var request = { acknowledge_sensitive: true };
+        if (passphrase) request.passphrase = passphrase;
         var response = await fetch("/api/desired-state/export", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ acknowledge_sensitive: true }),
+          body: JSON.stringify(request),
         });
         var exported = await response.json();
         if (!response.ok || !exported.ok) throw new Error(exported.error || "export unavailable");
@@ -1611,8 +1640,11 @@
         link.click();
         link.remove();
         URL.revokeObjectURL(url);
-        result.textContent = "Exported Accepted revision " + exported.revision +
-          ". The file contains network secrets; store it securely.";
+        result.textContent = exported.encrypted
+          ? "Exported Accepted revision " + exported.revision + " encrypted with your passphrase." +
+            " It contains network secrets; FWOS does not keep the passphrase, and restoring needs it."
+          : "Exported Accepted revision " + exported.revision +
+            ". The plaintext file contains network secrets; store it securely.";
       } catch (error) {
         result.textContent = "Export failed: " + error.message;
       } finally {
@@ -1624,14 +1656,19 @@
       event.preventDefault();
       var input = document.getElementById("import-file");
       var button = document.getElementById("import-desired");
+      var importPassphrase = document.getElementById("import-passphrase");
+      var passphrase = importPassphrase.value;
+      importPassphrase.value = "";
       if (pendingDraft || !input.files.length) return;
       button.disabled = true;
       try {
-        var content = await input.files[0].text();
+        var content = await importFileText(input.files[0]);
+        var request = { base_revision: acceptedRevision, content: content };
+        if (passphrase) request.passphrase = passphrase;
         var response = await fetch("/api/desired-state/import", {
           method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ base_revision: acceptedRevision, content: content }),
+          body: JSON.stringify(request),
         });
         var imported = await response.json();
         if (!response.ok || !imported.ok) {
@@ -1640,8 +1677,10 @@
           return;
         }
         input.value = "";
-        result.textContent = "Imported into your private draft against Accepted revision " +
-          imported.base_revision + "; networking unchanged. Review the pending draft before applying.";
+        result.textContent = (imported.encrypted ? "Decrypted and imported" : "Imported") +
+          " into your private draft against Accepted revision " + imported.base_revision +
+          "; networking unchanged. Review the pending draft before applying." +
+          (passphrase && !imported.encrypted ? " The file was not encrypted, so the passphrase was not used." : "");
         await Promise.all([loadInterfaces(), loadLanServices(), loadPolicy(), loadWireGuard(),
           loadQdiscs(), loadIpv6()].map(function (loading) { return loading.catch(function () {}); }));
       } catch (_) {
@@ -1863,12 +1902,16 @@
       "<button id=\"route-cancel-review\" type=\"button\">Cancel review</button></div>" +
       "<p id=\"route-result\" role=\"status\"></p></section>" +
       "<section><h3>Network Desired state transfer</h3>" +
-      "<p id=\"transfer-warning\" class=\"err\">The export is a plaintext file containing network secrets," +
-      " such as WireGuard private keys. Store it like a password. It contains no administrator accounts.</p>" +
+      "<p id=\"transfer-warning\" class=\"err\">The export contains network secrets, such as WireGuard private keys." +
+      " Without a passphrase it is a plaintext file; store it like a password. It contains no administrator accounts.</p>" +
+      "<label>Export passphrase (optional) <input id=\"export-passphrase\" type=\"password\" autocomplete=\"new-password\"></label>" +
+      "<label>Confirm export passphrase <input id=\"export-passphrase-confirm\" type=\"password\" autocomplete=\"new-password\"></label>" +
+      "<p>With a passphrase the file is encrypted with age; FWOS does not keep the passphrase, and restoring needs it.</p>" +
       "<label><input id=\"export-acknowledge\" type=\"checkbox\">I understand this file contains network secrets</label>" +
       "<button id=\"export-desired\" type=\"button\" disabled>Export network Desired state</button>" +
       "<form id=\"import-form\">" +
-      "<label>Network export file <input id=\"import-file\" type=\"file\" accept=\".toml,text/plain\" required></label>" +
+      "<label>Network export file <input id=\"import-file\" type=\"file\" accept=\".toml,.age,text/plain\" required></label>" +
+      "<label>Import passphrase (encrypted files only) <input id=\"import-passphrase\" type=\"password\" autocomplete=\"off\"></label>" +
       "<button id=\"import-desired\" type=\"submit\">Import into private draft</button></form>" +
       "<p id=\"transfer-result\" role=\"status\"></p></section>" +
       "<section><h3>Administrators</h3>" +
