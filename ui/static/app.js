@@ -1714,8 +1714,10 @@
       var last = result.last_update || {};
       var network = last.network || {};
       document.getElementById("host-update-health").textContent = last.outcome === "rolled_back"
-        ? "Release " + last.release + " failed appliance health (" + last.reason +
-          "); the appliance automatically returned to the previous Release. " +
+        ? (last.manual
+            ? "Release " + last.release + " was rolled back from the Appliance console before appliance health accepted it. "
+            : "Release " + last.release + " failed appliance health (" + last.reason +
+              "); the appliance automatically returned to the previous Release. ") +
           (network.outcome === "restored"
             ? "The pre-update network is restored as Accepted revision " + network.revision + "."
             : network.outcome === "unchanged"
