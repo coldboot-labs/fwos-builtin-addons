@@ -1713,19 +1713,23 @@
           : "No Release is staged.");
       var last = result.last_update || {};
       var network = last.network || {};
+      var networkText = network.outcome === "restored"
+        ? "The pre-update network is restored as Accepted revision " + network.revision + "."
+        : network.outcome === "unchanged"
+          ? "The pre-update network remained Accepted (revision " + network.revision + ")."
+          : network.outcome === "failed"
+            ? "The pre-update network could not be restored: " + network.error +
+              ". Review the Accepted network or restore it from the Appliance console."
+            : "Restoring the pre-update network.";
+      var manual = last.manual;
       document.getElementById("host-update-health").textContent = last.outcome === "rolled_back"
-        ? (last.manual
-            ? "Release " + last.release + " was rolled back from the Appliance console before appliance health accepted it. "
+        ? (manual
+            ? "The Host image was manually rolled back from " + last.release + " to " + manual.to + "." +
+              (manual.pre_update_network
+                ? " That update was never accepted. " + networkText
+                : " The Accepted network was kept.")
             : "Release " + last.release + " failed appliance health (" + last.reason +
-              "); the appliance automatically returned to the previous Release. ") +
-          (network.outcome === "restored"
-            ? "The pre-update network is restored as Accepted revision " + network.revision + "."
-            : network.outcome === "unchanged"
-              ? "The pre-update network remained Accepted (revision " + network.revision + ")."
-              : network.outcome === "failed"
-                ? "The pre-update network could not be restored: " + network.error +
-                  ". Review the Accepted network or restore it from the Appliance console."
-                : "Restoring the pre-update network.")
+              "); the appliance automatically returned to the previous Release. " + networkText)
         : last.outcome === "accepted"
           ? "Release " + last.release + " passed appliance health after its update reboot."
           : "";
