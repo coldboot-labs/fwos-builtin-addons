@@ -1712,9 +1712,18 @@
           ? "Staged Release: " + hostUpdateStaged + ". Reboot required to activate it."
           : "No Release is staged.");
       var last = result.last_update || {};
+      var network = last.network || {};
       document.getElementById("host-update-health").textContent = last.outcome === "rolled_back"
         ? "Release " + last.release + " failed appliance health (" + last.reason +
-          "); the appliance automatically returned to the previous Release and its network."
+          "); the appliance automatically returned to the previous Release. " +
+          (network.outcome === "restored"
+            ? "The pre-update network is restored as Accepted revision " + network.revision + "."
+            : network.outcome === "unchanged"
+              ? "The pre-update network remained Accepted (revision " + network.revision + ")."
+              : network.outcome === "failed"
+                ? "The pre-update network could not be restored: " + network.error +
+                  ". Review the Accepted network or restore it from the Appliance console."
+                : "Restoring the pre-update network.")
         : last.outcome === "accepted"
           ? "Release " + last.release + " passed appliance health after its update reboot."
           : "";
